@@ -8,9 +8,10 @@ const config = require('../config');
 
 // Temporary cookies file management
 const COOKIES_PATH = path.join(__dirname, '..', '..', '.yt-cookies.txt');
-if (config.youtubeCookies && !fs.existsSync(COOKIES_PATH)) {
+if (config.youtubeCookies) {
   try {
-    fs.writeFileSync(COOKIES_PATH, config.youtubeCookies, 'utf-8');
+    const rawCookies = config.youtubeCookies.replace(/\\n/g, '\n');
+    fs.writeFileSync(COOKIES_PATH, rawCookies, 'utf-8');
   } catch (err) {
     console.warn('[Track] Could not write temporary cookies file:', err.message);
   }
@@ -58,8 +59,9 @@ function getYtdlBaseArgs() {
     try {
       const os = require('os');
       const tempCookiePath = path.join(os.tmpdir(), 'yt-cookies.txt');
-      if (!fs.existsSync(tempCookiePath) || fs.readFileSync(tempCookiePath, 'utf8') !== config.youtubeCookies) {
-        fs.writeFileSync(tempCookiePath, config.youtubeCookies, 'utf8');
+      const rawCookies = config.youtubeCookies.replace(/\\n/g, '\n');
+      if (!fs.existsSync(tempCookiePath) || fs.readFileSync(tempCookiePath, 'utf8') !== rawCookies) {
+        fs.writeFileSync(tempCookiePath, rawCookies, 'utf8');
       }
       cookieFile = tempCookiePath;
     } catch (_) {}
@@ -101,9 +103,9 @@ function formatDuration(seconds) {
  * @returns {string}
  */
 function parseYtdlError(stderr) {
-  const err = (stderr || '').toLowerCase();
+  const err = (stderr || '').toLowerCase().replace(/[’‘]/g, "'");
   if (err.includes('sign in to confirm you\'re not a bot') || err.includes('confirm your age')) {
-    return 'YouTube blocked this request with bot verification. Datacenter IP blocked. (Add YouTube cookies in Render env to resolve).';
+    return 'YouTube requires sign-in verification from this host. Configure or refresh the private YouTube cookies on Render, then retry.';
   }
   if (err.includes('private video')) {
     return 'This video is private and cannot be played.';
@@ -377,6 +379,7 @@ class Track {
    */
   createAudioResource({ initialVolume = 80, filterName = 'off', seekSeconds = 0, targetBitrate = 96000 } = {}) {
     this.cleanup();
+    this.playbackError = null;
 
     const ytdlArgs = [
       ...getYtdlBaseArgs(),
@@ -437,6 +440,9 @@ class Track {
 
     ytdlProc.stderr.on('data', (d) => {
       if (ytdlStderr.length < 50000) ytdlStderr += d.toString();
+      if (this.activeYtdl === ytdlProc && /ERROR:/i.test(ytdlStderr)) {
+        this.playbackError = parseYtdlError(ytdlStderr);
+      }
     });
     ffmpegProc.stderr.on('data', (d) => {
       if (ffmpegStderr.length < 50000) ffmpegStderr += d.toString();

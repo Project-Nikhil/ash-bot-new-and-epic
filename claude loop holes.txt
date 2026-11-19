@@ -1,0 +1,334 @@
+================================================================================
+FOLLOW-UP PROMPT: FIX ALL LOOPHOLES IN "ASH" DISCORD MUSIC BOT
+================================================================================
+
+Paste everything below this line into your AI coding assistant, together with
+your current bot code (all files).
+
+--------------------------------------------------------------------------------
+
+You are a senior Discord bot engineer. I have a working Discord music bot called
+Ash (YouTube + Spotify links, slash and prefix commands, filters, lyrics,
+Auto-DJ, now-playing embed with buttons). It runs in Docker on Render and is
+kept awake by UptimeRobot. Below is my current code. Review it and fix every
+issue in this prompt without removing any existing feature.
+
+PROJECT CONTEXT
+- The bot is for a few small, private servers with friends. It is NOT public.
+- Priority 1: rock-solid 24/7 voice presence (this is the main feature).
+- Priority 2: the best audio quality Discord actually allows.
+- No DJ roles, permission systems, anti-troll logic, cooldowns, blacklists,
+  raid protection or sharding. Do NOT add these. Keep the bot simple.
+- Library: [discord.js / discord.py / Lavalink - TELL ME WHICH, or detect it
+  from my code].
+
+RULES FOR YOUR ANSWER
+1. Do not rewrite everything. Make targeted changes and keep my structure.
+2. For every file you change, give the complete updated file.
+3. After the code, give a short changelog: what was fixed and why.
+4. If something I asked for is impossible or misleading, say so and give the
+   closest honest alternative instead of faking it.
+5. Pin dependency versions and list any new packages I must install.
+
+================================================================================
+PART 1: 24/7 RELIABILITY (MAIN FEATURE)
+================================================================================
+
+1.1  Persistent 24/7 settings
+- Store per-guild 24/7 state (enabled, voice channel ID, text channel ID,
+  volume, loop mode, active filter) in a database that survives redeploys.
+  Render's free filesystem is ephemeral, so use a free external DB such as
+  SQLite on a persistent disk if available, otherwise Supabase/Postgres,
+  MongoDB Atlas free tier, or Turso. Explain which you chose and why.
+- On startup, read the saved settings and rejoin every 24/7 voice channel
+  automatically.
+
+1.2  Auto-reconnect that actually works
+- Handle voice disconnects, "Disconnected" and "Destroyed" states, being moved
+  to another channel, the channel being deleted, and network drops.
+- Use exponential backoff (for example 2s, 5s, 10s, 30s, max 60s) with a retry
+  limit, and log every attempt.
+- If the bot is manually disconnected by a user in 24/7 mode, rejoin the saved
+  channel. If the channel no longer exists, disable 24/7 for that guild and
+  post a message in the saved text channel.
+- Handle Discord gateway reconnects and resumed sessions without leaving
+  duplicate voice connections or duplicate players for the same guild.
+
+1.3  Graceful behaviour on redeploy and restart
+- Listen for SIGTERM and SIGINT: save state, then shut down cleanly.
+- On startup, restore the queue and current track position if possible,
+  otherwise start from the saved queue.
+- Be honest in the code comments and the spec: "auto-reconnect and state
+  restore" replaces the claim of "zero downtime", since restarts always cause
+  a short interruption.
+
+1.4  Alone-in-channel handling (even in 24/7 mode)
+- If nobody except the bot is in the voice channel, pause the stream after
+  [5] minutes (configurable). In 24/7 mode stay connected but stop
+  yt-dlp/ffmpeg work and stop Auto-DJ from queuing more songs.
+- Resume automatically when someone joins.
+- In non-24/7 mode, leave after the timeout.
+
+1.5  Health and keep-alive
+- Keep the HTTP server on port 3000 but return only a plain "ok" (no token,
+  guild names, user data, version info or stack traces).
+- Add a second internal watchdog: if the gateway is not ready, or no voice
+  heartbeat for 24/7 guilds is seen for [2] minutes, attempt recovery, and if
+  recovery fails exit the process so Docker/Render restarts it.
+- Use Docker restart policy / HEALTHCHECK where possible.
+
+1.6  Process stability
+- Add handlers for unhandledRejection, uncaughtException (or the Python
+  equivalents) that log the error and keep the bot alive when safe.
+- Make sure ffmpeg and yt-dlp child processes are killed when a track ends,
+  is skipped, stopped, or the connection drops. No zombie processes, no leaks.
+- Add a simple memory check: log memory use every few minutes and warn if the
+  process is near the host limit (Render free tier is about 512 MB).
+
+================================================================================
+PART 2: HIGH AUDIO QUALITY (HONEST VERSION)
+================================================================================
+
+2.1  Fix the incorrect claims
+- Remove or correct "384 kbps studio bitrate". Raw s16le stereo PCM at 48 kHz
+  is about 1,536 kbps, and Discord only transmits Opus anyway.
+- Set the Opus encoder bitrate to the maximum allowed by the voice channel:
+  read the channel's bitrate (guild boost level determines it: 64 kbps
+  default, 96, 128, 256, 384 kbps for level 3) and use that value, capped by
+  what the library and host CPU can handle. Re-read it if the channel
+  bitrate changes.
+- Use the highest quality Opus settings available: stereo, 48 kHz, 20 ms
+  frames, FEC off (unless the connection is bad), packet loss percentage low,
+  complexity high if CPU allows (lower it automatically on a weak host).
+- Be honest in the spec: YouTube audio is already lossy (Opus ~130-160 kbps
+  or AAC), so the pipeline preserves quality but cannot improve it.
+
+2.2  Two playback paths
+- Path A (no filter, volume 100): send the YouTube Opus stream directly with
+  no decoding and re-encoding wherever the library supports it, so there is no
+  extra quality loss.
+- Path B (filter active or volume not 100): decode with ffmpeg, apply the
+  filter chain, then encode to Opus.
+- Pick the path automatically per track, and switch when the user changes a
+  filter or volume.
+- Choose the best available audio format in yt-dlp (prefer bestaudio with
+  opus/webm, fall back to m4a).
+
+2.3  Resampling
+- YouTube Opus is already 48 kHz, so only resample when the source is not
+  48 kHz. Keep the high-quality resampler setting (for example
+  aresample=48000:precision=28) only in the path where resampling is needed.
+  Remove the "28-bit Chebyshev" claim unless I verify it against the real
+  ffmpeg options.
+
+2.4  Volume without clipping
+- Use a gain stage plus a limiter in the ffmpeg chain (for example volume and
+  alimiter) so volumes above 100 and Bass Boost do not clip.
+- Changing the volume should not restart the track. If the library supports
+  inline volume on the stream, use it, otherwise apply it smoothly.
+
+2.5  Filters (Bass Boost, Nightcore, 8D, Lo-Fi, Vaporwave)
+- Build each filter as a proper ffmpeg filter chain.
+- Changing a filter mid-song must restart ffmpeg from the current playback
+  position (use -ss with the elapsed time) so the song does not start over.
+  Debounce rapid filter changes.
+- Nightcore and Vaporwave change speed: keep the progress bar and lyrics sync
+  correct by applying the speed factor to the elapsed time.
+- Make 8D Audio lightweight (apulsator or a cheap alternative) so it does not
+  stutter on a small CPU. Add a note on which filters are CPU heavy.
+
+2.6  Buffering
+- Keep a small read-ahead buffer (the 64 KB buffer is fine) but make it
+  configurable. If the stream stalls, rebuffer and resume instead of
+  skipping the song.
+- Pre-resolve the next track in the queue (get the stream URL ahead of time)
+  so there is no gap between songs.
+
+================================================================================
+PART 3: YOUTUBE AND yt-dlp STABILITY (BIGGEST RISK)
+================================================================================
+
+3.1  Keep yt-dlp updated
+- Auto-update yt-dlp on startup and every 12-24 hours. If an update fails,
+  keep the old version. After updating, run a quick test extraction and log
+  the result.
+- Also retry with an update if extraction fails with a known "sign in",
+  "unable to extract", or HTTP 403 error, then retry the track once.
+
+3.2  Datacenter IP blocking (Render)
+- Detect the "Sign in to confirm you're not a bot" error and handle it
+  clearly: log a readable message and tell the user in chat that YouTube
+  blocked the request.
+- Add support for these solutions, controlled by environment variables:
+  a) cookies file (cookies.txt, loaded from a secret or environment variable,
+     never committed to the repo)
+  b) a PO token provider plugin for yt-dlp
+  c) an optional proxy URL
+  d) a documented option to self-host at home (Raspberry Pi or PC) which avoids
+     the problem
+- Add fallback order: try the main method, then the next one, then report
+  failure.
+
+3.3  Playback failure handling
+- If a track fails to load or stream, skip to the next one automatically and
+  show a short error ("Couldn't play X, skipping"), instead of freezing the
+  queue.
+- Detect age-restricted, region-locked, private and deleted videos and give a
+  clear message for each.
+- Handle livestreams (allow, but with no duration and a clear label) and block
+  or limit extremely long videos (see Part 5).
+
+================================================================================
+PART 4: INTERACTION AND COMMAND FIXES
+================================================================================
+
+4.1  Defer immediately
+- Every slash command that does any work (play, queue, lyrics, filter and so
+  on) must call defer within 3 seconds, then edit the reply. Same for button
+  and dropdown interactions.
+- Wrap handlers in try/catch so an error always produces a reply instead of
+  "application did not respond".
+
+4.2  Per-guild locking
+- Add a per-guild lock or queue for actions that change player state (skip,
+  stop, loop, filter change, track end). Double clicks and button presses
+  during a track change must not skip two songs or corrupt the queue.
+
+4.3  Now-playing message
+- Slash interaction tokens expire after 15 minutes. Send the now-playing
+  embed as a normal channel message and edit it through the message object,
+  not the interaction token.
+- Update the progress bar every 5-10 seconds, not on every tick, to stay under
+  Discord's edit rate limits.
+- For karaoke lyrics, group updates to around every 2-3 seconds, and fall
+  back to static lyrics if edits start getting rate limited.
+- After a restart, delete or disable old now-playing buttons, or make the
+  buttons work from saved state so they never do nothing.
+
+4.4  Commands
+- Remove the "#7165" discriminator from the spec and use the plain username.
+- Keep prefix commands but make sure the Message Content intent is enabled in
+  the Developer Portal and in code. Prefix and slash must share the same
+  handler logic (no duplicated code paths).
+- Make sure /stop respects 24/7 (clears the queue and stops audio, but stays
+  in the channel) and add a separate way to fully leave (for example /leave
+  or /247 off then /stop).
+- Do not let users from other voice channels control the player: a basic
+  same-channel check is enough here (no roles needed).
+
+================================================================================
+PART 5: INPUT SAFETY AND RESOURCE LIMITS (KEEP IT LIGHT)
+================================================================================
+
+5.1  No shell injection
+- Launch yt-dlp and ffmpeg with argument arrays (spawn/execFile or
+  subprocess with a list), never a shell string built from user input. Song
+  titles with quotes, ampersands or emojis must not break anything.
+
+5.2  Link handling
+- Only accept YouTube, YouTube Music and Spotify links, or plain search text.
+  Reject other URLs so yt-dlp's generic extractor cannot fetch random or
+  internal addresses.
+
+5.3  Spotify
+- State clearly in the code and the spec that Spotify audio is not streamed
+  directly. The bot reads track metadata (title, artist) and finds the match
+  on YouTube.
+- Handle Spotify playlists and albums with a sensible cap (for example 100
+  tracks) and resolve them lazily so the bot does not freeze.
+- Do not rely on Spotify's recommendation or related-artists endpoints
+  (deprecated for new apps). See Auto-DJ below.
+
+5.4  Loose limits to prevent accidents
+- Max queue size: 100 tracks (configurable).
+- Max single-track length: 3 hours (configurable), with livestreams handled
+  separately.
+- Max playlist import: 100 tracks (configurable).
+
+5.5  Safe text output
+- Disable mentions in all bot messages (allowed mentions: none) so a title
+  containing @everyone cannot ping anyone.
+- Escape or trim markdown in titles and keep embed fields within Discord
+  length limits.
+
+5.6  Secrets
+- All secrets (bot token, Spotify keys, cookies, proxy, database URL) come
+  from environment variables only. Add a .gitignore and .dockerignore that
+  exclude .env and cookies files.
+- Make sure the token can never appear in logs or error messages (redact
+  it).
+
+================================================================================
+PART 6: AUTO-DJ FIX
+================================================================================
+
+- Replace any dependency on Spotify recommendations with a working source:
+  YouTube Mix / "related" videos through yt-dlp, or a simple "same artist /
+  similar title search" approach.
+- Avoid repeating recently played tracks (keep the last 20 in memory).
+- Stop Auto-DJ when the channel is empty (see 1.4).
+- Be honest in the spec: "Auto-DJ" is based on related-video search, not AI,
+  unless a real model is added. Rename it or describe it accurately.
+- Add a /autodj on/off toggle and save it per guild.
+
+================================================================================
+PART 7: LYRICS (LRCLIB)
+================================================================================
+
+- Timeout LRCLIB requests after about 5 seconds and fail quietly with
+  "Lyrics not found" instead of crashing or hanging.
+- Cache lyrics for tracks already fetched.
+- Match lyrics using cleaned title and artist (strip "(Official Video)",
+  "[HD]", "ft." and similar) and fall back to plain, unsynced lyrics when
+  synced ones don't exist.
+- Account for speed filters (Nightcore, Vaporwave) when syncing.
+
+================================================================================
+PART 8: DOCKER, DEPENDENCIES AND DEPLOYMENT
+================================================================================
+
+- Provide a clean Dockerfile with a small base image, ffmpeg, yt-dlp, and the
+  required runtime. Run as a non-root user.
+- Pin all dependency versions in package.json / requirements.txt. List any
+  version that needs to be current for Discord's voice encryption (DAVE)
+  support, and tell me how to check this.
+- Show the environment variables I must set on Render.
+- Explain Render free-tier limits that affect the bot (RAM, CPU, sleep
+  behaviour, ephemeral disk) and what UptimeRobot can and cannot fix.
+- Recommend, in one short paragraph, whether to stay on Render or move to a
+  home server or a small VPS for better 24/7 and YouTube reliability.
+
+================================================================================
+PART 9: UPDATED SPEC AND TEST CHECKLIST
+================================================================================
+
+At the end, provide:
+
+A) A corrected, honest version of my SYSTEM PROMPT & SPECIFICATION (remove the
+   false claims about 384 kbps, "zero downtime", Chebyshev resampling and
+   "AI" Auto-DJ, and describe the real architecture).
+
+B) A short manual test checklist I can run:
+   1. /play with a song name, a YouTube link, and a Spotify link
+   2. Each filter mid-song (position must be kept)
+   3. Double-click Skip quickly
+   4. Redeploy the bot while 24/7 is on (it must rejoin and restore state)
+   5. Kick the bot from the voice channel (it must rejoin)
+   6. Delete the voice channel (it must disable 24/7 and post a message)
+   7. Leave the channel empty for the alone-timeout period
+   8. Play a 10-hour video and a 500-song playlist (limits must trigger)
+   9. Play a song with quotes and symbols in the title
+   10. Simulate a YouTube block error (it must show a clear message)
+   11. Let a song play for over 15 minutes (buttons and progress must still
+       work)
+   12. Leave it running for 24 hours and check memory and process count
+
+C) A prioritized list of anything you could not fix in code and that I must
+   do manually (for example setting up cookies or enabling intents).
+
+BEGIN by listing the problems you found in my code against this prompt, then
+provide the fixes.
+
+--------------------------------------------------------------------------------
+[PASTE YOUR BOT CODE BELOW THIS LINE]
+--------------------------------------------------------------------------------

@@ -1,5 +1,10 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { formatSeconds } = require('./ui');
+const { AUDIO_FILTERS } = require('./filters');
+
+// In-memory lyrics cache to prevent redundant external API hits
+const lyricsCache = new Map();
+const MAX_CACHE_SIZE = 100;
 
 /**
  * Strips common YouTube/Release noise from track titles for cleaner lyric searches
@@ -42,7 +47,7 @@ function parseLrc(lrcText) {
 }
 
 /**
- * Fetches lyrics from LRCLIB (open-source synced lyrics database)
+ * Fetches lyrics from LRCLIB with 5-second timeout and in-memory cache
  * @param {string} title
  * @param {string} artist
  * @returns {Promise<{ synced: Array<{ time: number, text: string }>, plain: string, title: string, artist: string }|null>}
@@ -50,21 +55,32 @@ function parseLrc(lrcText) {
 async function getLyrics(title, artist = '') {
   const cleanTitle = cleanTrackTitle(title);
   const cleanArtist = artist?.replace(/ - Topic|VEVO/gi, '').trim() || '';
+  const cacheKey = `${cleanTitle.toLowerCase()}:::${cleanArtist.toLowerCase()}`;
+
+  if (lyricsCache.has(cacheKey)) {
+    return lyricsCache.get(cacheKey);
+  }
 
   // 1. Try exact get endpoint if artist is known
   if (cleanArtist) {
     try {
       const url = `https://lrclib.net/api/get?track_name=${encodeURIComponent(cleanTitle)}&artist_name=${encodeURIComponent(cleanArtist)}`;
-      const res = await fetch(url, { headers: { 'User-Agent': 'AshDiscordBot/2.0 (music bot)' } });
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'AshDiscordBot/2.0 (music bot)' },
+        signal: AbortSignal.timeout(5000)
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.syncedLyrics || data.plainLyrics) {
-          return {
+          const result = {
             synced: parseLrc(data.syncedLyrics),
             plain: data.plainLyrics || '',
             title: data.trackName || cleanTitle,
             artist: data.artistName || cleanArtist
           };
+          if (lyricsCache.size >= MAX_CACHE_SIZE) lyricsCache.clear();
+          lyricsCache.set(cacheKey, result);
+          return result;
         }
       }
     } catch (_) {}
@@ -74,18 +90,23 @@ async function getLyrics(title, artist = '') {
   try {
     const searchQuery = cleanArtist ? `${cleanTitle} ${cleanArtist}` : cleanTitle;
     const searchUrl = `https://lrclib.net/api/search?q=${encodeURIComponent(searchQuery)}`;
-    const res = await fetch(searchUrl, { headers: { 'User-Agent': 'AshDiscordBot/2.0 (music bot)' } });
+    const res = await fetch(searchUrl, {
+      headers: { 'User-Agent': 'AshDiscordBot/2.0 (music bot)' },
+      signal: AbortSignal.timeout(5000)
+    });
     if (res.ok) {
       const results = await res.json();
       if (Array.isArray(results) && results.length > 0) {
-        // Prefer result with synced lyrics
         const best = results.find(r => r.syncedLyrics) || results[0];
-        return {
+        const result = {
           synced: parseLrc(best.syncedLyrics),
           plain: best.plainLyrics || '',
           title: best.trackName || cleanTitle,
           artist: best.artistName || cleanArtist
         };
+        if (lyricsCache.size >= MAX_CACHE_SIZE) lyricsCache.clear();
+        lyricsCache.set(cacheKey, result);
+        return result;
       }
     }
   } catch (_) {}
@@ -136,11 +157,16 @@ async function buildLyricsPayload(track, queue, viewMode = 'live') {
     return { embed, components: [row] };
   }
 
-  const elapsedSec = queue ? queue.getElapsedSeconds() : 0;
+  // Adjust elapsed time by filter speed factor (Nightcore / Vaporwave)
+  let elapsedSec = queue ? queue.getElapsedSeconds() : 0;
+  const filterObj = AUDIO_FILTERS[queue?.activeFilter || 'off'];
+  if (filterObj && filterObj.speedFactor && filterObj.speedFactor !== 1.0) {
+    elapsedSec = Math.floor(elapsedSec * filterObj.speedFactor);
+  }
+
   const hasSynced = lyricsData.synced.length > 0;
 
   if (hasSynced && viewMode === 'live') {
-    // Find index of current lyric line
     let activeIndex = -1;
     for (let i = 0; i < lyricsData.synced.length; i++) {
       if (lyricsData.synced[i].time <= elapsedSec) {
@@ -150,7 +176,6 @@ async function buildLyricsPayload(track, queue, viewMode = 'live') {
       }
     }
 
-    // Build focused karaoke window (3 lines before, current line, 4 lines after)
     const start = Math.max(0, activeIndex - 3);
     const end = Math.min(lyricsData.synced.length, activeIndex + 5);
     const windowLines = lyricsData.synced.slice(start, end);
@@ -173,7 +198,6 @@ async function buildLyricsPayload(track, queue, viewMode = 'live') {
     );
     embed.setFooter({ text: 'Mode: Live Synchronized Karaoke • LRCLIB' });
   } else {
-    // Full Lyrics Mode (or fallback if no synced timestamps exist)
     const textToShow = lyricsData.plain || lyricsData.synced.map(s => s.text).filter(Boolean).join('\n');
     const truncated = textToShow.length > 3900 ? textToShow.slice(0, 3900) + '\n\n*...[Lyrics truncated for length]*' : textToShow;
 
@@ -181,7 +205,6 @@ async function buildLyricsPayload(track, queue, viewMode = 'live') {
     embed.setFooter({ text: 'Mode: Full Text Lyrics' });
   }
 
-  // Action Buttons: Refresh line, Toggle Live/Full view
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('music_lyrics_refresh')

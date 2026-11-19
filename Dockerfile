@@ -19,13 +19,21 @@ WORKDIR /usr/src/app
 COPY package*.json ./
 RUN npm install --omit=dev
 
-# Copy source code
+# Copy source code and set ownership to non-root node user
 COPY . .
+RUN mkdir -p data && chown -R node:node /usr/src/app
+
+# Switch to non-root user
+USER node
 
 # Expose HTTP health-check keep-alive port
 EXPOSE 3000
 
 ENV NODE_ENV=production
 ENV PORT=3000
+
+# Docker healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:3000 || exit 1
 
 CMD ["npm", "start"]

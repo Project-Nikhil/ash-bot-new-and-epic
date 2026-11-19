@@ -16,6 +16,8 @@ const {
 const { Track } = require('./Track');
 const { AUDIO_FILTERS } = require('./filters');
 
+const RECONNECT_BACKOFFS = [2000, 5000, 10000, 30000, 60000];
+
 class GuildQueue {
   constructor({ manager, guildId, voiceChannel, textChannel }) {
     this.manager = manager;
@@ -31,30 +33,59 @@ class GuildQueue {
     this.destroyed = false;
     this.consecutiveQuickFails = 0;
     this.idleTimer = null;
+    this.aloneTimer = null;
+    this.pausedDueToAlone = false;
     this.currentResource = null;
     this.nowPlayingMessage = null;
+    this.actionLock = false;
 
-    // Modern AI & Audio Features
+    // Filter, Auto-DJ & History
     this.activeFilter = 'off';
     this.autoDj = false;
+    this.recentTracks = []; // Stores last 20 titles to prevent repetition
     this.playbackStartTime = null;
     this.pausedAt = null;
     this.totalPausedDuration = 0;
+
+    // Reconnection state
+    this.reconnectAttempts = 0;
+    this.reconnectTimeout = null;
+
+    // Load persisted settings
+    const saved = guildSettings.get(guildId);
+    if (saved) {
+      if (typeof saved.volume === 'number') this.volume = saved.volume;
+      if (saved.loopMode) this.loopMode = saved.loopMode;
+      if (saved.activeFilter) this.activeFilter = saved.activeFilter;
+      if (typeof saved.autoDj === 'boolean') this.autoDj = saved.autoDj;
+    }
 
     // Create AudioPlayer
     this.player = createAudioPlayer();
     this.setupPlayerListeners();
 
     // Establish Voice Connection
+    this.initVoiceConnection();
+  }
+
+  initVoiceConnection() {
+    if (!this.voiceChannel) return;
+
     this.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId: guildId,
-      adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+      channelId: this.voiceChannel.id,
+      guildId: this.guildId,
+      adapterCreator: this.voiceChannel.guild.voiceAdapterCreator,
       selfDeaf: true
     });
 
     this.connection.subscribe(this.player);
     this.setupConnectionListeners();
+
+    // Persist current channels
+    guildSettings.set(this.guildId, {
+      voiceChannelId: this.voiceChannel.id,
+      textChannelId: this.textChannel?.id || null
+    });
   }
 
   setupConnectionListeners() {
@@ -64,14 +95,75 @@ class GuildQueue {
           entersState(this.connection, VoiceConnectionStatus.Signalling, 5000),
           entersState(this.connection, VoiceConnectionStatus.Connecting, 5000)
         ]);
+        // Successfully reconnected
+        this.reconnectAttempts = 0;
       } catch (error) {
-        this.destroy();
+        this.handleVoiceDisconnect();
       }
     });
 
     this.connection.on(VoiceConnectionStatus.Destroyed, () => {
-      this.destroy();
+      if (!this.destroyed) {
+        this.handleVoiceDisconnect();
+      }
     });
+  }
+
+  /**
+   * Exponential backoff auto-reconnect for 24/7 reliability
+   */
+  async handleVoiceDisconnect() {
+    if (this.destroyed) return;
+
+    const settings = guildSettings.get(this.guildId);
+    if (!settings.stay247) {
+      this.destroy();
+      return;
+    }
+
+    if (this.reconnectAttempts >= RECONNECT_BACKOFFS.length) {
+      console.warn(`[VoiceConnection] Guild ${this.guildId}: Max reconnect attempts reached.`);
+      if (this.textChannel) {
+        this.textChannel.send('⚠️ Could not reconnect to voice channel after multiple attempts. 24/7 paused until manually rejoined.').catch(() => {});
+      }
+      this.destroy();
+      return;
+    }
+
+    const delay = RECONNECT_BACKOFFS[this.reconnectAttempts] || 60000;
+    this.reconnectAttempts += 1;
+    console.log(`[VoiceConnection] Guild ${this.guildId}: Reconnecting in ${delay / 1000}s (Attempt ${this.reconnectAttempts})...`);
+
+    if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+    this.reconnectTimeout = setTimeout(async () => {
+      if (this.destroyed) return;
+      try {
+        const client = this.voiceChannel?.client || this.textChannel?.client;
+        if (!client) return;
+
+        // Verify channel still exists
+        const channelId = settings.voiceChannelId || this.voiceChannel?.id;
+        const channel = await client.channels.fetch(channelId).catch(() => null);
+
+        if (!channel) {
+          console.warn(`[VoiceConnection] Guild ${this.guildId}: Saved voice channel no longer exists.`);
+          guildSettings.set(this.guildId, { stay247: false, voiceChannelId: null });
+          if (this.textChannel) {
+            this.textChannel.send('⚠️ The 24/7 voice channel was deleted. 24/7 mode has been disabled.').catch(() => {});
+          }
+          this.destroy();
+          return;
+        }
+
+        this.voiceChannel = channel;
+        this.initVoiceConnection();
+        this.reconnectAttempts = 0;
+        console.log(`[VoiceConnection] Guild ${this.guildId}: Successfully reconnected!`);
+      } catch (err) {
+        console.error(`[VoiceConnection] Reconnect error for guild ${this.guildId}:`, err.message);
+        this.handleVoiceDisconnect();
+      }
+    }, delay);
   }
 
   setupPlayerListeners() {
@@ -81,12 +173,25 @@ class GuildQueue {
 
     this.player.on('error', (error) => {
       console.error(`[AudioPlayer Error] in guild ${this.guildId}:`, error.message);
-      const settings = guildSettings.get(this.guildId);
-      if (this.textChannel && this.textChannel.id !== settings.setupChannelId) {
+      if (this.textChannel) {
         this.textChannel.send(`⚠️ Error playing track: ${error.message}. Skipping to next...`).catch(() => {});
       }
       this.handleTrackEnd();
     });
+  }
+
+  /**
+   * Action lock / mutex wrapper to prevent double-skips and state corruption
+   * @param {Function} fn
+   */
+  async withLock(fn) {
+    if (this.actionLock) return false;
+    this.actionLock = true;
+    try {
+      return await fn();
+    } finally {
+      this.actionLock = false;
+    }
   }
 
   getElapsedSeconds() {
@@ -96,71 +201,131 @@ class GuildQueue {
     return Math.max(0, Math.floor(elapsedMs / 1000));
   }
 
-  /**
-   * Updates the Pinned Live Player Dashboard in the Dedicated Music Channel (if configured)
-   */
   async updateDashboard() {
     const client = this.voiceChannel?.client || this.textChannel?.client;
     if (!client) return;
     await this.manager.refreshDashboard(client, this.guildId, this);
   }
 
+  /**
+   * Inspects voice channel to see if bot is alone
+   * Pauses after 5 mins if 24/7, leaves if non-24/7, auto-resumes when user joins
+   */
+  checkAloneStatus() {
+    if (!this.voiceChannel || this.destroyed) return;
+    const humans = this.voiceChannel.members.filter(m => !m.user.bot);
+
+    if (humans.size === 0) {
+      if (!this.aloneTimer) {
+        this.aloneTimer = setTimeout(() => {
+          this.handleAloneTimeout();
+        }, config.aloneTimeoutMs);
+      }
+    } else {
+      if (this.aloneTimer) {
+        clearTimeout(this.aloneTimer);
+        this.aloneTimer = null;
+      }
+      if (this.pausedDueToAlone) {
+        this.pausedDueToAlone = false;
+        this.resume();
+        if (this.textChannel) {
+          this.textChannel.send('👋 Someone joined the voice channel! Resuming music.').catch(() => {});
+        }
+      }
+    }
+  }
+
+  handleAloneTimeout() {
+    const settings = guildSettings.get(this.guildId);
+    if (settings.stay247) {
+      this.pausedDueToAlone = true;
+      this.pause();
+      if (this.currentTrack) {
+        this.currentTrack.cleanup(); // Clean up child processes to free CPU/RAM
+      }
+      if (this.textChannel) {
+        this.textChannel.send('⏸️ Channel empty for 5 minutes. Paused playback to save bandwidth & CPU (staying connected in 24/7 mode).').catch(() => {});
+      }
+    } else {
+      if (this.textChannel) {
+        this.textChannel.send('👋 Voice channel was empty for 5 minutes. Left voice channel to save resources.').catch(() => {});
+      }
+      this.destroy();
+    }
+  }
+
   async handleTrackEnd() {
     if (this.destroyed) return;
 
-    const playDurationMs = this.playbackStartTime ? Date.now() - this.playbackStartTime : 0;
-    const finishedTrack = this.currentTrack;
-    if (finishedTrack) {
-      finishedTrack.cleanup();
-    }
+    await this.withLock(async () => {
+      const playDurationMs = this.playbackStartTime ? Date.now() - this.playbackStartTime : 0;
+      const finishedTrack = this.currentTrack;
 
-    // Guard against tight infinite failure loops if stream fails instantly
-    if (finishedTrack && playDurationMs < 1500) {
-      this.consecutiveQuickFails += 1;
-    } else {
-      this.consecutiveQuickFails = 0;
-    }
-
-    this.playbackStartTime = null;
-    this.pausedAt = null;
-    this.totalPausedDuration = 0;
-
-    if (this.consecutiveQuickFails >= 3) {
-      this.consecutiveQuickFails = 0;
-      this.currentTrack = null;
-      this.currentResource = null;
-      this.loopMode = 'off';
-      this.processQueue();
-      return;
-    }
-
-    // Handle Loop Modes
-    if (this.loopMode === 'track' && finishedTrack) {
-      this.play(finishedTrack);
-      return;
-    }
-
-    if (this.loopMode === 'queue' && finishedTrack) {
-      this.tracks.push(finishedTrack);
-    }
-
-    this.currentTrack = null;
-    this.currentResource = null;
-
-    // Handle Auto-DJ when queue runs dry
-    if (this.tracks.length === 0 && this.autoDj && finishedTrack) {
-      if (this.textChannel) {
-        this.textChannel.send('🤖 *AI Auto-DJ is finding the next recommended track...*').catch(() => {});
+      if (finishedTrack) {
+        finishedTrack.cleanup();
+        // Record title in recent history (up to 20 tracks)
+        if (finishedTrack.title) {
+          this.recentTracks.push(finishedTrack.title);
+          if (this.recentTracks.length > 20) this.recentTracks.shift();
+        }
       }
 
-      const recommendation = await Track.getRecommendation(finishedTrack.title, finishedTrack.requestedBy);
-      if (recommendation) {
-        this.enqueue(recommendation);
+      // Guard against rapid infinite failure loops
+      if (finishedTrack && playDurationMs < 1500) {
+        this.consecutiveQuickFails += 1;
+      } else {
+        this.consecutiveQuickFails = 0;
+      }
+
+      this.playbackStartTime = null;
+      this.pausedAt = null;
+      this.totalPausedDuration = 0;
+
+      if (this.consecutiveQuickFails >= 3) {
+        console.warn(`[MusicQueue] Guild ${this.guildId}: 3 consecutive quick failures. Resetting queue.`);
+        this.consecutiveQuickFails = 0;
+        this.currentTrack = null;
+        this.currentResource = null;
+        this.loopMode = 'off';
+        this.processQueue();
         return;
       }
-    }
 
-    this.processQueue();
+      // Handle Loop Modes
+      if (this.loopMode === 'track' && finishedTrack) {
+        this.play(finishedTrack);
+        return;
+      }
+
+      if (this.loopMode === 'queue' && finishedTrack) {
+        this.tracks.push(finishedTrack);
+      }
+
+      this.currentTrack = null;
+      this.currentResource = null;
+
+      // Auto-DJ: Find next related song when queue is dry
+      if (this.tracks.length === 0 && this.autoDj && finishedTrack && !this.pausedDueToAlone) {
+        if (this.textChannel) {
+          this.textChannel.send('📻 *Auto-DJ is searching for a related track...*').catch(() => {});
+        }
+
+        const recommendation = await Track.getRecommendation(
+          finishedTrack.title,
+          finishedTrack.uploader,
+          this.recentTracks,
+          finishedTrack.requestedBy
+        );
+
+        if (recommendation) {
+          this.enqueue(recommendation);
+          return;
+        }
+      }
+
+      this.processQueue();
+    });
   }
 
   enqueue(trackOrTracks) {
@@ -182,6 +347,7 @@ class GuildQueue {
 
     this.tracks.push(...toAdd);
     this.resetIdleTimer();
+    this.saveState();
 
     if (isIdle) {
       this.processQueue();
@@ -201,11 +367,13 @@ class GuildQueue {
     if (this.tracks.length === 0) {
       this.updateDashboard();
       this.startIdleTimer();
+      this.saveState();
       return;
     }
 
     this.resetIdleTimer();
     const nextTrack = this.tracks.shift();
+    this.saveState();
     this.play(nextTrack);
   }
 
@@ -217,16 +385,23 @@ class GuildQueue {
     this.totalPausedDuration = 0;
 
     try {
-      const resource = track.createAudioResource(this.volume, this.activeFilter);
+      const targetBitrate = this.voiceChannel?.bitrate || 96000;
+      const resource = track.createAudioResource({
+        initialVolume: this.volume,
+        filterName: this.activeFilter,
+        seekSeconds: 0,
+        targetBitrate
+      });
+
       this.currentResource = resource;
       this.player.play(resource);
 
-      // Disable buttons on previous track's message to keep chat neat
+      // Disable buttons on previous message to avoid confusion
       if (this.nowPlayingMessage) {
         this.nowPlayingMessage.edit({ components: [] }).catch(() => {});
       }
 
-      // Send Now Playing message with interactive controls
+      // Send fresh Now Playing controller embed
       if (this.textChannel) {
         const embed = createNowPlayingEmbed(track, this);
         const components = createControlComponents(this);
@@ -247,35 +422,42 @@ class GuildQueue {
     }
   }
 
-  setFilter(filterName) {
-    if (!AUDIO_FILTERS[filterName]) {
-      this.activeFilter = 'off';
-    } else {
-      this.activeFilter = filterName;
-    }
+  /**
+   * Mid-song filter changes without restarting from 0:
+   * Restarts FFmpeg starting at current playback position (seekSeconds)
+   * @param {string} filterName
+   * @returns {string}
+   */
+  async setFilter(filterName) {
+    const selected = AUDIO_FILTERS[filterName] ? filterName : 'off';
+    if (this.activeFilter === selected) return selected;
+
+    this.activeFilter = selected;
+    guildSettings.set(this.guildId, { activeFilter: selected });
 
     if (this.currentTrack && this.player.state.status !== AudioPlayerStatus.Idle) {
+      const elapsed = this.getElapsedSeconds();
+      const targetBitrate = this.voiceChannel?.bitrate || 96000;
       try {
-        const resource = this.currentTrack.createAudioResource(this.volume, this.activeFilter);
+        const resource = this.currentTrack.createAudioResource({
+          initialVolume: this.volume,
+          filterName: this.activeFilter,
+          seekSeconds: elapsed,
+          targetBitrate
+        });
+
         this.currentResource = resource;
         this.player.play(resource);
+        this.playbackStartTime = Date.now() - (elapsed * 1000);
+        this.pausedAt = null;
+        this.totalPausedDuration = 0;
       } catch (err) {
-        console.error('Error applying audio filter:', err);
+        console.error('[Filter Change Error]', err);
       }
     }
 
     this.updateDashboard();
     return this.activeFilter;
-  }
-
-  toggleAutoDj(forcedState) {
-    this.autoDj = typeof forcedState === 'boolean' ? forcedState : !this.autoDj;
-    this.updateDashboard();
-    return this.autoDj;
-  }
-
-  skip() {
-    this.player.stop();
   }
 
   pause() {
@@ -310,6 +492,7 @@ class GuildQueue {
       this.currentTrack = null;
     }
     this.player.stop();
+    this.saveState();
 
     const settings = guildSettings.get(this.guildId);
     if (settings.stay247 && !forceLeave) {
@@ -320,11 +503,20 @@ class GuildQueue {
     this.destroy();
   }
 
+  skip() {
+    if (this.player.state.status !== AudioPlayerStatus.Idle) {
+      this.player.stop();
+      return true;
+    }
+    return false;
+  }
+
   setVolume(volume) {
     this.volume = Math.max(1, Math.min(100, volume));
     if (this.currentResource && this.currentResource.volume) {
       this.currentResource.volume.setVolume(this.volume / 100);
     }
+    guildSettings.set(this.guildId, { volume: this.volume });
     this.updateDashboard();
   }
 
@@ -336,8 +528,15 @@ class GuildQueue {
       const nextIdx = (modes.indexOf(this.loopMode) + 1) % modes.length;
       this.loopMode = modes[nextIdx];
     }
+    guildSettings.set(this.guildId, { loopMode: this.loopMode });
     this.updateDashboard();
     return this.loopMode;
+  }
+
+  toggleAutoDj(enabled) {
+    this.autoDj = typeof enabled === 'boolean' ? enabled : !this.autoDj;
+    guildSettings.set(this.guildId, { autoDj: this.autoDj });
+    return this.autoDj;
   }
 
   startIdleTimer() {
@@ -364,50 +563,85 @@ class GuildQueue {
     }
   }
 
+  /**
+   * Persists active queue and state for redeploy / restart recovery
+   */
+  saveState() {
+    const savedQueue = this.tracks.map(t => ({
+      title: t.title,
+      url: t.url,
+      displayUrl: t.displayUrl,
+      duration: t.duration,
+      durationFormatted: t.durationFormatted,
+      thumbnail: t.thumbnail,
+      uploader: t.uploader,
+      requestedBy: t.requestedBy,
+      isLive: t.isLive
+    }));
+
+    guildSettings.set(this.guildId, {
+      voiceChannelId: this.voiceChannel?.id || null,
+      textChannelId: this.textChannel?.id || null,
+      volume: this.volume,
+      loopMode: this.loopMode,
+      activeFilter: this.activeFilter,
+      autoDj: this.autoDj,
+      savedQueue,
+      lastPlaybackPosition: this.getElapsedSeconds()
+    });
+  }
+
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.resetIdleTimer();
 
-    const client = this.voiceChannel?.client || this.textChannel?.client;
+    this.resetIdleTimer();
+    if (this.aloneTimer) {
+      clearTimeout(this.aloneTimer);
+      this.aloneTimer = null;
+    }
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
 
     if (this.currentTrack) {
       this.currentTrack.cleanup();
       this.currentTrack = null;
     }
 
-    for (const track of this.tracks) {
-      track.cleanup();
-    }
     this.tracks = [];
 
+    if (this.nowPlayingMessage) {
+      this.nowPlayingMessage.edit({ components: [] }).catch(() => {});
+      this.nowPlayingMessage = null;
+    }
+
     try {
-      this.player.stop();
+      this.player.stop(true);
     } catch (_) {}
 
     try {
-      if (this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
-        this.connection.destroy();
-      }
+      this.connection.destroy();
     } catch (_) {}
 
     this.manager.delete(this.guildId);
-
-    if (client) {
-      this.manager.refreshDashboard(client, this.guildId, null);
-    }
+    this.updateDashboard();
   }
 }
 
 class MusicManager {
   constructor() {
-    /** @type {Map<string, GuildQueue>} */
     this.queues = new Map();
+  }
+
+  get(guildId) {
+    return this.queues.get(guildId) || null;
   }
 
   getOrCreate({ guildId, voiceChannel, textChannel }) {
     let queue = this.queues.get(guildId);
-    if (!queue) {
+    if (!queue || queue.destroyed) {
       queue = new GuildQueue({
         manager: this,
         guildId,
@@ -416,50 +650,45 @@ class MusicManager {
       });
       this.queues.set(guildId, queue);
     } else {
-      queue.voiceChannel = voiceChannel;
-      queue.textChannel = textChannel;
+      if (voiceChannel && queue.voiceChannel?.id !== voiceChannel.id) {
+        queue.voiceChannel = voiceChannel;
+      }
+      if (textChannel) {
+        queue.textChannel = textChannel;
+      }
     }
     return queue;
-  }
-
-  get(guildId) {
-    return this.queues.get(guildId);
   }
 
   delete(guildId) {
     this.queues.delete(guildId);
   }
 
-  /**
-   * Refreshes the pinned live player controller embed inside the guild's setup channel
-   * @param {import('discord.js').Client} client
-   * @param {string} guildId
-   * @param {GuildQueue|null} [queueOverride]
-   */
-  async refreshDashboard(client, guildId, queueOverride = undefined) {
+  async refreshDashboard(client, guildId, queue = null) {
     const settings = guildSettings.get(guildId);
     if (!settings.setupChannelId || !settings.setupMessageId) return;
 
     try {
       const channel = await client.channels.fetch(settings.setupChannelId).catch(() => null);
-      if (!channel || !channel.isTextBased()) return;
+      if (!channel) return;
 
-      const msg = await channel.messages.fetch(settings.setupMessageId).catch(() => null);
-      if (!msg) return;
+      const message = await channel.messages.fetch(settings.setupMessageId).catch(() => null);
+      if (!message) return;
 
-      const queue = queueOverride !== undefined ? queueOverride : this.queues.get(guildId);
-      const embed = queue && queue.currentTrack
+      const hasTrack = queue && queue.currentTrack;
+      const embed = hasTrack
         ? createDashboardEmbed(queue)
         : createIdleDashboardEmbed(guildId);
 
-      const components = createControlComponents(queue || null, guildId);
+      const components = createControlComponents(queue, guildId);
 
-      await msg.edit({
-        content: null,
+      await message.edit({
         embeds: [embed],
         components
       }).catch(() => {});
-    } catch (_) {}
+    } catch (err) {
+      console.warn(`[Dashboard Refresh] Failed in guild ${guildId}:`, err.message);
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 # ⚡ Ash Music - Discord Music Bot
 
-A modern, high-performance Discord music bot with **24/7 Voice Channel mode**, Spotify playlist support, interactive controls, and real-time DSP audio filters.
+A rock-solid, private Discord music bot with **persistent 24/7 Voice Channel presence**, Spotify conversion, mid-song audio DSP filters with anti-clipping protection, and live karaoke lyrics.
 
 ---
 
@@ -13,37 +13,36 @@ All commands work seamlessly as Discord **Slash Commands (`/`)** and as classic 
 | `/play <query>` | `!play`, `!p` | Play a song title, YouTube URL, or Spotify track / album / playlist link |
 | `/pause` | `!pause` | Pause current playback |
 | `/resume` | `!resume`, `!unpause` | Resume paused playback |
-| `/skip` | `!skip`, `!s`, `!next` | Skip to the next track in the queue |
-| `/stop` | `!stop`, `!leave`, `!dc` | Stop playing, clear the queue, and leave (or stay if 24/7 is on) |
+| `/skip` | `!skip`, `!s` | Skip to the next track in the queue (protected against double-clicks) |
+| `/stop` | `!stop` | Stop playback and clear the queue (stays in voice if 24/7 is enabled) |
+| `/leave` | `!leave`, `!dc` | Forcefully disconnect from the voice channel and turn off 24/7 mode |
 | `/queue` | `!queue`, `!q` | View currently playing song and upcoming queue |
 | `/nowplaying` | `!nowplaying`, `!np` | Show track details, live progress bar, and interactive buttons |
-| `/volume <1-100>` | `!volume`, `!vol` | Adjust playback volume |
+| `/volume <1-100>` | `!volume`, `!vol` | Adjust playback volume with zero digital clipping |
 | `/loop [mode]` | `!loop`, `!repeat` | Set loop mode (`off`, `track`, `queue`) |
-| `/filter <name>` | `!filter`, `!fx` | Apply audio DSP filters (Bass Boost, Nightcore, 8D, Lo-Fi, etc.) |
-| `/lyrics` | `!lyrics`, `!ly` | Display synchronized karaoke lyrics via LRCLIB |
-| `/247 [enabled]` | `!247`, `!stay` | Keep the bot permanently in the voice channel |
+| `/filter <name>` | `!filter`, `!fx` | Apply audio DSP filters mid-song without restarting playback |
+| `/lyrics` | `!lyrics`, `!ly` | Display synchronized karaoke lyrics via LRCLIB (5s timeout & cache) |
+| `/247 [enabled]` | `!247`, `!stay` | Keep the bot permanently in the voice channel with auto-reconnect |
+| `/autodj [enabled]` | `!autodj`, `!dj` | Automatically queue related songs when the queue finishes |
+| `/help` | `!help`, `!h` | Display command guide and directory |
 
 ---
 
-## ✨ Features
+## ✨ Features & Architecture
 
-* **Universal `/play`:** Search by song name (e.g., `/play starboy`), paste direct YouTube links, or paste **Spotify tracks, albums, and playlists**.
-* **📻 24/7 Voice Mode:** Use `/247 true` to keep the bot connected to your voice channel around the clock without timing out.
-* **🎮 Interactive Now Playing Controller:** Every track sends a sleek embed with live buttons (`Pause/Resume`, `Skip`, `Loop`, `Stop`, `Queue`, `Lyrics`, and `Filter` dropdown) for easy one-click control.
-* **🎛️ Real-Time DSP Audio Filters:**
-  * **Bass Boost (+10dB Lows)**
-  * **Nightcore (1.25x Pitch & Speed)**
-  * **8D Spatial Audio (360° Surround Panning)**
-  * **Lo-Fi Chill (Warm Analog Filter)**
-  * **Vaporwave (Slowed + Deep Reverb)**
-* **🎤 Live Synced Lyrics:** Real-time karaoke-highlighted lyrics powered by LRCLIB with zero API keys required.
+* **📻 24/7 Voice Persistence:** Auto-reconnects on network drops or disconnects using exponential backoff (2s, 5s, 10s, 30s, 60s). Saves queue and channels on redeploy so it automatically rejoins and restores state.
+* **🛡️ Smart Idle & Alone-in-Channel Saver:** If everyone leaves the voice channel for 5 minutes in 24/7 mode, streaming processes (`yt-dlp`, `ffmpeg`) are suspended to save host CPU and RAM, and resume instantly as soon as a user rejoins.
+* **🎧 Honest Audio Quality:** Native Opus stream passthrough via `yt-dlp` preserving source fidelity. Features dynamic voice channel bitrate matching and an `alimiter` to prevent digital clipping on Bass Boost or high volumes.
+* **🎛️ Mid-Track DSP Filters:** Switching filters (Bass Boost, Nightcore, 8D Spatial, Lo-Fi, Vaporwave) smoothly restarts playback from the exact elapsed second rather than jumping back to 0.
+* **🎤 Synced Karaoke Lyrics:** Fetches timestamped LRC lyrics from LRCLIB with in-memory caching and speed-factor synchronization.
+* **🔒 Strict Security:** Protected against shell injection (argument arrays only), `@everyone` pings (`allowedMentions: { parse: [] }`), and token leakage (secrets redacted from error logs).
 
 ---
 
 ## 🚀 How to Start the Bot Locally
 
 ```powershell
-# 1. Register slash commands (already done!)
+# 1. Register slash commands
 npm run deploy
 
 # 2. Start the bot
@@ -54,33 +53,27 @@ npm start
 
 ## 🌐 24/7 Cloud Hosting (Render + UptimeRobot)
 
-This bot includes a built-in HTTP health-check server (`src/index.js`) and a production `Dockerfile` with `yt-dlp` and `ffmpeg` pre-installed.
+### Step 1: Deploy on Render
+1. Create a **Web Service** on [Render.com](https://render.com) connected to your repository.
+2. Render detects the **Dockerfile** automatically and builds Node 20, FFmpeg, and yt-dlp.
+3. In **Environment Variables**, paste the variables from your `.env` file (`DISCORD_TOKEN`, `CLIENT_ID`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `PORT=3000`).
+4. Click **Create Web Service**.
 
-### Step 1: Push to GitHub
-1. Create a repository on [GitHub](https://github.com).
-2. Push your project files (your `.env` is automatically protected and ignored by `.gitignore`).
+### Step 2: Keep-Alive with UptimeRobot
+1. In [UptimeRobot.com](https://uptimerobot.com), click **+ Add New Monitor**.
+2. **Monitor Type:** `HTTP(s)`
+3. **URL:** Your Render URL (`https://your-bot-name.onrender.com`)
+4. **Monitoring Interval:** `5 minutes`
+5. Click **Create Monitor**. Render will receive an HTTP ping every 5 minutes and will never go to sleep.
 
-### Step 2: Deploy on Render
-1. Go to [Render.com](https://render.com) and sign in with GitHub.
-2. Click **New +** > **Web Service**.
-3. Select your bot repository.
-4. Render will auto-detect the `Dockerfile`.
-5. Select the **Free** instance type.
-6. Under **Environment Variables**, add:
-   * `DISCORD_TOKEN` = Your bot token
-   * `CLIENT_ID` = Your bot client ID
-   * `SPOTIFY_CLIENT_ID` = (Optional) Spotify Client ID
-   * `SPOTIFY_CLIENT_SECRET` = (Optional) Spotify Client Secret
-7. Click **Create Web Service**.
-8. Copy your Render web service URL (e.g. `https://your-bot-name.onrender.com`).
+---
 
-### Step 3: Keep Alive with UptimeRobot
-1. Go to [UptimeRobot.com](https://uptimerobot.com) (free).
-2. Click **Add New Monitor**:
-   * **Monitor Type**: `HTTP(s)`
-   * **Friendly Name**: `Ash Music Bot`
-   * **URL**: `https://your-bot-name.onrender.com`
-   * **Monitoring Interval**: `5 minutes`
-3. Click **Create Monitor**.
-*UptimeRobot will ping your bot every 5 minutes, keeping Render awake 24/7!*
+## 📋 Manual Verification Checklist
 
+1. `/play starboy` — verify audio playback starts.
+2. `/filter bassboost` mid-song — verify playback resumes from the exact same second without starting over.
+3. Rapidly double-click **Skip** — verify only 1 track skips (lock prevents skipping two tracks).
+4. Restart/redeploy container — verify bot rejoins the 24/7 channel and restores state.
+5. Disconnect the bot manually — verify bot auto-reconnects using backoff.
+6. Leave the voice channel empty — verify bot pauses playback after 5 minutes and resumes when you rejoin.
+7. `/stop` vs `/leave` — verify `/stop` clears queue and stays in voice, while `/leave` disconnects completely.

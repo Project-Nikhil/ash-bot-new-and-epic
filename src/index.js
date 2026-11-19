@@ -1,5 +1,7 @@
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
+const { exec } = require('child_process');
 const { Client, Collection, GatewayIntentBits } = require('discord.js');
 const config = require('./config');
 
@@ -15,7 +17,11 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
-  ]
+  ],
+  allowedMentions: {
+    parse: [],
+    repliedUser: false
+  }
 });
 
 // Load Commands & Aliases
@@ -30,7 +36,6 @@ for (const file of commandFiles) {
   if ('data' in command) {
     client.commands.set(command.data.name, command);
 
-    // Register text command aliases
     if (command.aliases && Array.isArray(command.aliases)) {
       for (const alias of command.aliases) {
         client.aliases.set(alias.toLowerCase(), command);
@@ -55,31 +60,93 @@ for (const file of eventFiles) {
   }
 }
 
-// Global process error handlers
+// Global Process Error Handlers with Secret Redaction
 process.on('unhandledRejection', (reason) => {
-  console.error('[Unhandled Rejection]', reason);
+  console.error('[Unhandled Rejection]', config.redactSecrets(String(reason?.stack || reason)));
 });
 
 process.on('uncaughtException', (error) => {
-  console.error('[Uncaught Exception]', error);
+  console.error('[Uncaught Exception]', config.redactSecrets(String(error?.stack || error)));
 });
 
-// Built-in HTTP Healthcheck & Keep-Alive Server (For 24/7 Hosting on Render / Railway / UptimeRobot)
-const http = require('http');
+// Built-in HTTP Healthcheck Server (Plain "ok" response - no leaks)
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    status: 'online',
-    bot: client.user?.tag || 'Initializing...',
-    uptime: Math.floor(process.uptime()),
-    timestamp: new Date().toISOString()
-  }));
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('ok');
 }).listen(PORT, () => {
-  console.log(`🌐 [24/7 Server] HTTP keep-alive server listening on port ${PORT}`);
+  console.log(`🌐 [24/7 Keep-Alive] Healthcheck server listening on port ${PORT}`);
 });
 
+// Gateway & Voice Watchdog
+let disconnectedSince = null;
+setInterval(() => {
+  // Status: 0 = READY, 1 = CONNECTING, 2 = RECONNECTING, 3 = IDLE, 4 = NEARLY, 5 = DISCONNECTED
+  if (client.ws.status !== 0) {
+    if (!disconnectedSince) disconnectedSince = Date.now();
+    const offlineSeconds = Math.floor((Date.now() - disconnectedSince) / 1000);
+
+    if (offlineSeconds >= 120) {
+      console.error(`🚨 [Watchdog] Gateway unresponsive for ${offlineSeconds}s. Restarting process...`);
+      process.exit(1); // Exits so Docker / Render restarts the container
+    }
+  } else {
+    disconnectedSince = null;
+  }
+}, 30000);
+
+// Memory Watcher (Logs usage every 5 mins, warns if > 400MB)
+setInterval(() => {
+  const mem = process.memoryUsage();
+  const rssMb = Math.round(mem.rss / 1024 / 1024);
+  const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
+
+  if (rssMb > 400) {
+    console.warn(`⚠️ [Memory Watcher] RSS memory is ${rssMb}MB (Heap: ${heapMb}MB). Approaching Render host threshold.`);
+    if (global.gc) global.gc();
+  }
+}, 300000);
+
+// yt-dlp Periodic Auto-Update (Every 12 hours)
+function checkYtdlUpdate() {
+  exec('yt-dlp -U', (err, stdout, stderr) => {
+    if (err) {
+      console.warn('[yt-dlp Update Check]', (stderr || err.message).trim().slice(0, 100));
+    } else {
+      console.log('[yt-dlp Update Check]', stdout.trim().slice(0, 100));
+    }
+  });
+}
+setTimeout(checkYtdlUpdate, 30000);
+setInterval(checkYtdlUpdate, 12 * 60 * 60 * 1000);
+
+// Graceful Shutdown Handler (SIGTERM on Render redeploy, SIGINT on Ctrl+C)
+let isShuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`[Shutdown] Received ${signal}. Saving active queues and closing voice streams...`);
+
+  const musicManager = require('./music/MusicManager');
+  for (const queue of musicManager.queues.values()) {
+    try {
+      queue.saveState();
+      queue.destroy();
+    } catch (_) {}
+  }
+
+  try {
+    client.destroy();
+  } catch (_) {}
+
+  console.log('[Shutdown] Clean shutdown completed. Exiting.');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 client.login(config.token).catch((err) => {
-  console.error('❌ Failed to login to Discord:', err.message);
+  console.error('❌ Failed to login to Discord:', config.redactSecrets(err.message));
   process.exit(1);
 });

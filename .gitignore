@@ -7,4 +7,5 @@ compile_mod.py
 get_events.py
 .DS_Store
 Thumbs.db
-
+*cookies*
+*.tmp

@@ -1,7 +1,67 @@
+const fs = require('fs');
+const path = require('path');
 const { spawn } = require('child_process');
 const { createAudioResource, StreamType } = require('@discordjs/voice');
 const { isSpotifyUrl, getSpotifyTracks } = require('./spotify');
 const { AUDIO_FILTERS } = require('./filters');
+const config = require('../config');
+
+// Temporary cookies file management
+const COOKIES_PATH = path.join(__dirname, '..', '..', '.yt-cookies.txt');
+if (config.youtubeCookies && !fs.existsSync(COOKIES_PATH)) {
+  try {
+    fs.writeFileSync(COOKIES_PATH, config.youtubeCookies, 'utf-8');
+  } catch (err) {
+    console.warn('[Track] Could not write temporary cookies file:', err.message);
+  }
+}
+
+/**
+ * Validates whether an input URL is safe (YouTube, YouTube Music, or Spotify only)
+ * Rejects random web URLs or internal addresses
+ * @param {string} input
+ * @returns {boolean}
+ */
+function isAllowedUrl(input) {
+  try {
+    const parsed = new URL(input);
+    const host = parsed.hostname.toLowerCase();
+    const allowed = [
+      'youtube.com',
+      'www.youtube.com',
+      'm.youtube.com',
+      'music.youtube.com',
+      'youtu.be',
+      'open.spotify.com'
+    ];
+    return allowed.some(h => host === h || host.endsWith('.' + h));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns common arguments for all yt-dlp invocations
+ * @returns {string[]}
+ */
+function getYtdlBaseArgs() {
+  const args = [
+    '--no-warnings',
+    '--no-check-certificates',
+    '--socket-timeout', '10'
+  ];
+
+  const cookieFile = config.youtubeCookiesPath || (fs.existsSync(COOKIES_PATH) ? COOKIES_PATH : null);
+  if (cookieFile) {
+    args.push('--cookies', cookieFile);
+  }
+
+  if (config.youtubeProxy) {
+    args.push('--proxy', config.youtubeProxy);
+  }
+
+  return args;
+}
 
 /**
  * Format seconds into HH:MM:SS or MM:SS
@@ -9,7 +69,9 @@ const { AUDIO_FILTERS } = require('./filters');
  * @returns {string}
  */
 function formatDuration(seconds) {
-  if (!seconds || isNaN(seconds)) return 'Live / Unknown';
+  if (seconds === null || seconds === undefined || isNaN(seconds) || seconds <= 0) {
+    return '🔴 LIVE';
+  }
   const hrs = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
   const secs = Math.floor(seconds % 60);
@@ -20,32 +82,67 @@ function formatDuration(seconds) {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
+/**
+ * Parses stderr and returns a user-friendly error message
+ * @param {string} stderr
+ * @returns {string}
+ */
+function parseYtdlError(stderr) {
+  const err = (stderr || '').toLowerCase();
+  if (err.includes('sign in to confirm you\'re not a bot') || err.includes('confirm your age')) {
+    return 'YouTube blocked this request with bot verification. Datacenter IP blocked. (Add YouTube cookies in Render env to resolve).';
+  }
+  if (err.includes('private video')) {
+    return 'This video is private and cannot be played.';
+  }
+  if (err.includes('this video is not available') || err.includes('video unavailable')) {
+    return 'This video is deleted or unavailable.';
+  }
+  if (err.includes('http error 403')) {
+    return 'YouTube rejected stream access (HTTP 403 Forbidden).';
+  }
+  if (err.includes('premieres in') || err.includes('upcoming')) {
+    return 'This video has not premiered yet.';
+  }
+  return stderr.trim().split('\n').pop() || 'Unknown stream extraction error';
+}
+
 class Track {
-  constructor({ title, url, displayUrl, duration, durationFormatted, thumbnail, uploader, requestedBy }) {
-    this.title = title;
+  constructor({ title, url, displayUrl, duration, durationFormatted, thumbnail, uploader, requestedBy, isLive = false }) {
+    this.title = title || 'Unknown Title';
     this.url = url;
     this.displayUrl = displayUrl || url;
-    this.duration = duration;
-    this.durationFormatted = durationFormatted;
-    this.thumbnail = thumbnail;
-    this.uploader = uploader;
-    this.requestedBy = requestedBy;
+    this.duration = duration || 0;
+    this.durationFormatted = durationFormatted || formatDuration(duration);
+    this.thumbnail = thumbnail || null;
+    this.uploader = uploader || 'Unknown Artist';
+    this.requestedBy = requestedBy || null;
+    this.isLive = Boolean(isLive || duration === 0);
 
     // References to active child processes for streaming
     this.activeYtdl = null;
     this.activeFfmpeg = null;
+    this.directStreamUrl = null;
   }
 
   /**
-   * Resolves a query or URL into Track object(s) using Spotify API or yt-dlp
+   * Resolves a query or URL into Track object(s) safely
    * @param {string} query
    * @param {object} requestedBy - Discord user
    * @returns {Promise<Track[]>}
    */
   static async resolve(query, requestedBy) {
+    const trimmed = query.trim();
+    const isUrl = /^https?:\/\//i.test(trimmed);
+
+    // Security check: Only allow YouTube & Spotify links
+    if (isUrl && !isAllowedUrl(trimmed)) {
+      throw new Error('Unsupported URL. Only YouTube, YouTube Music, and Spotify links (or search text) are supported.');
+    }
+
     // 1. Check for Spotify URLs
-    if (isSpotifyUrl(query)) {
-      const spotifyTracks = await getSpotifyTracks(query);
+    if (isSpotifyUrl(trimmed)) {
+      const spotifyTracks = await getSpotifyTracks(trimmed);
       if (!spotifyTracks || spotifyTracks.length === 0) {
         throw new Error('No tracks found for this Spotify link.');
       }
@@ -53,7 +150,7 @@ class Track {
       return spotifyTracks.map(st => new Track({
         title: st.title,
         url: `ytsearch1:${st.query}`,
-        displayUrl: query,
+        displayUrl: trimmed,
         duration: st.duration,
         durationFormatted: formatDuration(st.duration),
         thumbnail: st.thumbnail,
@@ -62,14 +159,12 @@ class Track {
       }));
     }
 
-    // 2. Resolve via yt-dlp (YouTube, SoundCloud, direct audio URLs, etc.)
+    // 2. Resolve via yt-dlp
     return new Promise((resolve, reject) => {
-      const isUrl = /^https?:\/\//i.test(query.trim());
-      const target = isUrl ? query.trim() : `ytsearch1:${query.trim()}`;
-
+      const target = isUrl ? trimmed : `ytsearch1:${trimmed}`;
       const args = [
+        ...getYtdlBaseArgs(),
         '--dump-single-json',
-        '--no-warnings',
         '--default-search', 'ytsearch',
         '--flat-playlist',
         target
@@ -79,51 +174,59 @@ class Track {
       let stdout = '';
       let stderr = '';
 
-      proc.stdout.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      proc.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
       proc.on('close', (code) => {
         if (code !== 0) {
-          return reject(new Error(stderr.trim() || `yt-dlp exited with code ${code}`));
+          return reject(new Error(parseYtdlError(stderr)));
         }
 
         try {
           const data = JSON.parse(stdout);
           const tracks = [];
 
-          // If result is a playlist / multi-item result
           if (data._type === 'playlist' && Array.isArray(data.entries)) {
             for (const entry of data.entries) {
               if (!entry) continue;
+              const dur = entry.duration || 0;
+              const isLive = Boolean(entry.is_live || dur === 0);
+
+              // Limit max track duration (3 hours)
+              if (!isLive && dur > config.maxTrackDurationSeconds) continue;
+
               const trackUrl = entry.url || entry.webpage_url || (entry.id ? `https://www.youtube.com/watch?v=${entry.id}` : target);
               tracks.push(new Track({
                 title: entry.title || 'Unknown Title',
                 url: trackUrl,
                 displayUrl: trackUrl,
-                duration: entry.duration || 0,
-                durationFormatted: formatDuration(entry.duration),
+                duration: dur,
+                durationFormatted: formatDuration(dur),
                 thumbnail: entry.thumbnails?.[0]?.url || entry.thumbnail || null,
                 uploader: entry.uploader || entry.channel || 'Unknown Artist',
-                requestedBy
+                requestedBy,
+                isLive
               }));
             }
           } else {
-            // Single video / track
+            const dur = data.duration || 0;
+            const isLive = Boolean(data.is_live || dur === 0);
+
+            if (!isLive && dur > config.maxTrackDurationSeconds) {
+              return reject(new Error(`Track duration (${formatDuration(dur)}) exceeds the 3-hour limit.`));
+            }
+
             const trackUrl = data.webpage_url || data.url || target;
             tracks.push(new Track({
               title: data.title || 'Unknown Title',
               url: trackUrl,
               displayUrl: trackUrl,
-              duration: data.duration || 0,
-              durationFormatted: formatDuration(data.duration),
+              duration: dur,
+              durationFormatted: formatDuration(dur),
               thumbnail: data.thumbnail || data.thumbnails?.[0]?.url || null,
               uploader: data.uploader || data.channel || 'Unknown Artist',
-              requestedBy
+              requestedBy,
+              isLive
             }));
           }
 
@@ -133,18 +236,18 @@ class Track {
 
           resolve(tracks);
         } catch (err) {
-          reject(new Error(`Failed to parse track information: ${err.message}`));
+          reject(new Error(`Failed to parse track info: ${err.message}`));
         }
       });
 
       proc.on('error', (err) => {
-        reject(new Error(`Failed to run yt-dlp: ${err.message}`));
+        reject(new Error(`yt-dlp process failed: ${err.message}`));
       });
     });
   }
 
   /**
-   * Search for top N tracks and return metadata for interactive selection
+   * Search multiple results for query
    * @param {string} query
    * @param {object} requestedBy
    * @param {number} limit
@@ -154,8 +257,8 @@ class Track {
     return new Promise((resolve, reject) => {
       const target = `ytsearch${limit}:${query.trim()}`;
       const args = [
+        ...getYtdlBaseArgs(),
         '--dump-single-json',
-        '--no-warnings',
         '--flat-playlist',
         target
       ];
@@ -168,22 +271,24 @@ class Track {
       proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
       proc.on('close', (code) => {
-        if (code !== 0) return reject(new Error(stderr.trim() || `Search exited with code ${code}`));
+        if (code !== 0) return reject(new Error(parseYtdlError(stderr)));
 
         try {
           const data = JSON.parse(stdout);
           const entries = data.entries || [data];
           const results = entries.slice(0, limit).map(entry => {
+            const dur = entry.duration || 0;
             const trackUrl = entry.url || entry.webpage_url || (entry.id ? `https://www.youtube.com/watch?v=${entry.id}` : null);
             return new Track({
               title: entry.title || 'Unknown Track',
               url: trackUrl,
               displayUrl: trackUrl,
-              duration: entry.duration || 0,
-              durationFormatted: formatDuration(entry.duration),
+              duration: dur,
+              durationFormatted: formatDuration(dur),
               thumbnail: entry.thumbnails?.[0]?.url || entry.thumbnail || null,
               uploader: entry.uploader || entry.channel || 'Unknown Artist',
-              requestedBy
+              requestedBy,
+              isLive: Boolean(entry.is_live || dur === 0)
             });
           });
 
@@ -199,41 +304,79 @@ class Track {
   }
 
   /**
-   * Smart AI Auto-DJ Recommendation
-   * Finds a related high-energy song based on previous track title
+   * Auto-DJ Track Discovery based on Related Music Search
+   * Avoids repeating tracks present in the recent history
    * @param {string} currentTitle
+   * @param {string} currentArtist
+   * @param {string[]} recentTitles - List of up to last 20 played titles
    * @param {object} requestedBy
    * @returns {Promise<Track|null>}
    */
-  static async getRecommendation(currentTitle, requestedBy) {
+  static async getRecommendation(currentTitle, currentArtist, recentTitles = [], requestedBy = null) {
     try {
-      const cleanTitle = currentTitle.replace(/[^\w\s]/gi, '').slice(0, 40);
-      const results = await Track.search(`${cleanTitle} mix music audio`, requestedBy, 3);
-      // Pick a result that doesn't share identical title
-      const pick = results.find(r => !r.title.toLowerCase().includes(cleanTitle.toLowerCase())) || results[0];
-      return pick || null;
-    } catch (_) {
+      const cleanTitle = (currentTitle || '').replace(/[^\w\s]/gi, ' ').trim().slice(0, 30);
+      const cleanArtist = (currentArtist || '').replace(/[^\w\s]/gi, ' ').trim().slice(0, 30);
+      const searchQuery = cleanArtist ? `${cleanArtist} official audio` : `${cleanTitle} mix music`;
+
+      const results = await Track.search(searchQuery, requestedBy, 6);
+      const normalizedRecent = recentTitles.map(t => (t || '').toLowerCase().trim());
+
+      // Pick the first track not in recently played history and not identical to current
+      const freshPick = results.find(r => {
+        const titleLower = r.title.toLowerCase().trim();
+        const isRecent = normalizedRecent.some(recent => titleLower.includes(recent) || recent.includes(titleLower));
+        const isCurrent = titleLower.includes(cleanTitle.toLowerCase());
+        return !isRecent && !isCurrent;
+      }) || results[0];
+
+      return freshPick || null;
+    } catch {
       return null;
     }
   }
 
   /**
-   * Spawns yt-dlp piped to ffmpeg (with optional DSP audio filters) and returns an AudioResource
-   * @param {number} initialVolume
-   * @param {string} filterName
+   * Spawns yt-dlp piped to ffmpeg (with optional DSP audio filters & anti-clip limiter)
+   * Supports mid-track position seeking and dynamic channel bitrate adaptation
+   * @param {object} options
+   * @param {number} options.initialVolume
+   * @param {string} options.filterName
+   * @param {number} options.seekSeconds
+   * @param {number} options.targetBitrate - Target bitrate from voice channel (e.g. 64000 - 384000)
    * @returns {AudioResource}
    */
-  createAudioResource(initialVolume = 80, filterName = 'off') {
+  createAudioResource({ initialVolume = 80, filterName = 'off', seekSeconds = 0, targetBitrate = 96000 } = {}) {
     this.cleanup();
 
     const ytdlArgs = [
+      ...getYtdlBaseArgs(),
       '-o', '-',
       '-f', 'bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/ba*',
       '--no-playlist',
       '--quiet',
-      '--buffer-size', '64K',
-      this.url
+      '--buffer-size', '64K'
     ];
+
+    if (seekSeconds > 0) {
+      // Direct stream seek forward
+      ytdlArgs.push('--start-time', Math.floor(seekSeconds).toString());
+    }
+
+    ytdlArgs.push(this.url);
+
+    // Dynamic bitrate capping
+    const safeBitrate = Math.min(Math.max(64000, targetBitrate || 96000), 384000);
+    const bitrateStr = `${Math.floor(safeBitrate / 1000)}k`;
+
+    const activeFilter = AUDIO_FILTERS[filterName];
+    const filterChain = [];
+
+    if (activeFilter && activeFilter.ffmpeg) {
+      filterChain.push(activeFilter.ffmpeg);
+    }
+
+    // Always append anti-clipping audio limiter for safe playback
+    filterChain.push('alimiter=limit=0.95:attack=5:release=50');
 
     const ffmpegArgs = [
       '-reconnect', '1',
@@ -244,17 +387,6 @@ class Track {
       '-loglevel', '0'
     ];
 
-    // Audio DSP Filter & High-Fidelity Resampling
-    const activeFilter = AUDIO_FILTERS[filterName];
-    const filterChain = [];
-
-    if (activeFilter && activeFilter.ffmpeg) {
-      filterChain.push(activeFilter.ffmpeg);
-    }
-
-    // High-precision 48kHz studio audio resampling to prevent artifacts and clipping
-    filterChain.push('aresample=48000:precision=28:cheby=1');
-
     if (filterChain.length > 0) {
       ffmpegArgs.push('-af', filterChain.join(','));
     }
@@ -263,12 +395,12 @@ class Track {
       '-f', 's16le',
       '-ar', '48000',
       '-ac', '2',
-      '-b:a', '384k',
+      '-b:a', bitrateStr,
       'pipe:1'
     );
 
     const ytdlProc = spawn('yt-dlp', ytdlArgs, {
-      stdio: ['ignore', 'pipe', 'ignore']
+      stdio: ['ignore', 'pipe', 'pipe']
     });
 
     const ffmpegProc = spawn('ffmpeg', ffmpegArgs, {
@@ -277,16 +409,16 @@ class Track {
 
     ytdlProc.stdout.pipe(ffmpegProc.stdin);
 
-    // Prevent uncaught errors from crashing process if pipe breaks
+    // Prevent uncaught errors from crashing process
     ytdlProc.on('error', () => {});
     ytdlProc.stdout.on('error', () => {});
+    ytdlProc.stderr.on('error', () => {});
     ffmpegProc.on('error', () => {});
     ffmpegProc.stdin.on('error', () => {});
     ffmpegProc.stdout.on('error', () => {});
 
-    // Ensure both processes terminate cleanly if either exits early
     ffmpegProc.on('close', () => {
-      try { ytdlProc.kill('SIGKILL'); } catch (_) {}
+      this.cleanup();
     });
 
     this.activeYtdl = ytdlProc;
@@ -305,13 +437,13 @@ class Track {
   }
 
   /**
-   * Kills any running child processes and destroys streams for this track
+   * Cleanly terminates active child processes to prevent zombies and memory leaks
    */
   cleanup() {
     if (this.activeYtdl) {
       try {
-        this.activeYtdl.stdout?.unpipe();
         this.activeYtdl.stdout?.destroy();
+        this.activeYtdl.stderr?.destroy();
         this.activeYtdl.kill('SIGKILL');
       } catch (_) {}
       this.activeYtdl = null;
@@ -327,4 +459,9 @@ class Track {
   }
 }
 
-module.exports = { Track, formatDuration };
+module.exports = {
+  Track,
+  formatDuration,
+  isAllowedUrl,
+  getYtdlBaseArgs
+};

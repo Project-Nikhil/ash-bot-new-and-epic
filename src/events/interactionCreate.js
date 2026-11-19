@@ -25,7 +25,8 @@ function buildUpdatedPayload(interaction, queue) {
 
   return {
     embeds: embed ? [embed] : undefined,
-    components: createControlComponents(queue, interaction.guildId)
+    components: createControlComponents(queue, interaction.guildId),
+    allowedMentions: { parse: [] }
   };
 }
 
@@ -45,8 +46,9 @@ module.exports = {
       } catch (error) {
         console.error(`[ERROR] Error executing command ${interaction.commandName}:`, error);
         const replyPayload = {
-          content: '❌ There was an error while executing this command!',
-          ephemeral: true
+          content: '❌ An error occurred while executing this command!',
+          ephemeral: true,
+          allowedMentions: { parse: [] }
         };
         if (interaction.replied || interaction.deferred) {
           await interaction.followUp(replyPayload).catch(() => {});
@@ -67,12 +69,20 @@ module.exports = {
           return interaction.reply({ content: '❌ No active music session in this server!', ephemeral: true });
         }
 
+        const memberVoice = interaction.member?.voice?.channel;
+        if (!memberVoice || (queue.voiceChannel && memberVoice.id !== queue.voiceChannel.id)) {
+          return interaction.reply({
+            content: `❌ You must be in the same voice channel (<#${queue.voiceChannel?.id}>) to change audio filters!`,
+            ephemeral: true
+          });
+        }
+
         await interaction.deferUpdate();
         const selectedFilter = interaction.values[0];
-        const newFilter = queue.setFilter(selectedFilter);
+        const newFilter = await queue.setFilter(selectedFilter);
         const filterInfo = AUDIO_FILTERS[newFilter] || AUDIO_FILTERS.off;
 
-        await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch((e) => console.error('[UI Update Error]', e));
+        await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch(() => {});
         await interaction.followUp({
           content: `🎛️ **Audio DSP Filter updated:** \`${filterInfo.emoji} ${filterInfo.name}\``,
           ephemeral: true
@@ -87,7 +97,6 @@ module.exports = {
       if (!customId.startsWith('music_')) return;
 
       const settings = guildSettings.get(interaction.guildId);
-      const isSetupChannel = settings.setupChannelId && interaction.channelId === settings.setupChannelId;
 
       // 24/7 toggle can work even when no queue is active
       if (customId === 'music_247_toggle') {
@@ -113,15 +122,15 @@ module.exports = {
           queue.startIdleTimer();
         }
 
-        await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch((e) => console.error('[24/7 UI Update Error]', e));
+        await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch(() => {});
         await interaction.followUp({
-          content: `📻 **24/7 VC Mode:** \`${nextState ? '🟢 ENABLED' : '⚪ DISABLED'}\``,
+          content: `📻 **24/7 Voice Mode:** \`${nextState ? '🟢 ENABLED' : '⚪ DISABLED'}\``,
           ephemeral: true
         }).catch(() => {});
         return;
       }
 
-      // Live Synchronized Lyrics Viewer (Ephemeral)
+      // Live Lyrics Viewer (Ephemeral)
       if (customId === 'music_lyrics') {
         const queue = musicManager.get(interaction.guildId);
         if (!queue || !queue.currentTrack) {
@@ -134,11 +143,11 @@ module.exports = {
         return interaction.editReply({ embeds: [payload.embed], components: payload.components });
       }
 
-      // Refresh line or Toggle Live/Full Lyrics mode
+      // Refresh lyrics line or Toggle Live/Full Lyrics mode
       if (customId === 'music_lyrics_refresh' || customId.startsWith('music_lyrics_toggle:')) {
         const queue = musicManager.get(interaction.guildId);
         if (!queue || !queue.currentTrack) {
-          return interaction.followUp({ content: '❌ That song has finished playing.', ephemeral: true }).catch(() => {});
+          return interaction.reply({ content: '❌ That song has finished playing.', ephemeral: true }).catch(() => {});
         }
 
         await interaction.deferUpdate();
@@ -148,6 +157,7 @@ module.exports = {
         return interaction.editReply({ embeds: [payload.embed], components: payload.components });
       }
 
+      // Same-channel validation for playback controls
       const memberVoice = interaction.member?.voice?.channel;
       if (!memberVoice) {
         return interaction.reply({
@@ -164,6 +174,13 @@ module.exports = {
         });
       }
 
+      if (queue.voiceChannel && memberVoice.id !== queue.voiceChannel.id) {
+        return interaction.reply({
+          content: `❌ You must be in the same voice channel (<#${queue.voiceChannel.id}>) to control music!`,
+          ephemeral: true
+        });
+      }
+
       switch (customId) {
         case 'music_toggle_pause': {
           await interaction.deferUpdate();
@@ -172,24 +189,29 @@ module.exports = {
           } else {
             queue.pause();
           }
-          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch((e) => console.error('[Pause UI Update Error]', e));
+          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch(() => {});
           break;
         }
 
         case 'music_skip': {
+          await interaction.deferReply();
           const title = queue.currentTrack?.title || 'current song';
-          await interaction.reply({
-            content: `⏭️ <@${interaction.user.id}> skipped **${title}**.`,
-            ephemeral: isSetupChannel
-          });
-          queue.skip();
+          const skipped = queue.skip();
+          if (skipped) {
+            await interaction.editReply({
+              content: `⏭️ **${title}** skipped.`,
+              allowedMentions: { parse: [] }
+            });
+          } else {
+            await interaction.editReply({ content: '❌ Nothing to skip.' });
+          }
           break;
         }
 
         case 'music_loop': {
           await interaction.deferUpdate();
           const newMode = queue.toggleLoop();
-          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch((e) => console.error('[Loop UI Update Error]', e));
+          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch(() => {});
           await interaction.followUp({
             content: `🔁 Loop mode updated to: **${newMode.toUpperCase()}**`,
             ephemeral: true
@@ -201,7 +223,7 @@ module.exports = {
           await interaction.deferUpdate();
           const newVol = Math.max(1, queue.volume - 10);
           queue.setVolume(newVol);
-          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch((e) => console.error('[Vol- UI Update Error]', e));
+          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch(() => {});
           await interaction.followUp({ content: `🔉 Volume decreased to **${newVol}%**`, ephemeral: true }).catch(() => {});
           break;
         }
@@ -210,7 +232,7 @@ module.exports = {
           await interaction.deferUpdate();
           const newVol = Math.min(100, queue.volume + 10);
           queue.setVolume(newVol);
-          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch((e) => console.error('[Vol+ UI Update Error]', e));
+          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch(() => {});
           await interaction.followUp({ content: `🔊 Volume increased to **${newVol}%**`, ephemeral: true }).catch(() => {});
           break;
         }
@@ -218,9 +240,9 @@ module.exports = {
         case 'music_autodj_toggle': {
           await interaction.deferUpdate();
           const state = queue.toggleAutoDj();
-          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch((e) => console.error('[AutoDJ UI Update Error]', e));
+          await interaction.editReply(buildUpdatedPayload(interaction, queue)).catch(() => {});
           await interaction.followUp({
-            content: `🤖 **AI Auto-DJ is now:** \`${state ? '🟢 ENGAGED' : '⚪ DISABLED'}\``,
+            content: `📻 **Auto-DJ (Related Music) is now:** \`${state ? '🟢 ENGAGED' : '⚪ DISABLED'}\``,
             ephemeral: true
           }).catch(() => {});
           break;
@@ -233,11 +255,12 @@ module.exports = {
         }
 
         case 'music_stop': {
-          await interaction.reply({
-            content: `⏹️ <@${interaction.user.id}> stopped the music session.`,
-            ephemeral: isSetupChannel
-          });
+          await interaction.deferReply();
           queue.stop();
+          await interaction.editReply({
+            content: `⏹️ Music playback stopped.`,
+            allowedMentions: { parse: [] }
+          });
           break;
         }
 

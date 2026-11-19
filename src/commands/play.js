@@ -1,16 +1,16 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-const { Track, formatDuration } = require('../music/Track');
+const { Track } = require('../music/Track');
 const musicManager = require('../music/MusicManager');
 const config = require('../config');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Play a song name, YouTube link, or Spotify track/album/playlist')
+    .setDescription('Play a song title, YouTube link, or Spotify track/album/playlist')
     .addStringOption(option =>
       option
         .setName('query')
-        .setDescription('The song title, YouTube URL, or Spotify track/album/playlist link')
+        .setDescription('Song title, YouTube URL, or Spotify track/album/playlist link')
         .setRequired(true)
     ),
 
@@ -21,6 +21,14 @@ module.exports = {
     if (!voiceChannel) {
       return interaction.reply({
         content: '❌ You must be in a voice channel to play music!',
+        ephemeral: true
+      });
+    }
+
+    const existingQueue = musicManager.get(interaction.guildId);
+    if (existingQueue && existingQueue.voiceChannel && existingQueue.voiceChannel.id !== voiceChannel.id) {
+      return interaction.reply({
+        content: `❌ I am already active in <#${existingQueue.voiceChannel.id}>. Please join that channel to request music!`,
         ephemeral: true
       });
     }
@@ -61,10 +69,10 @@ module.exports = {
         const embed = new EmbedBuilder()
           .setColor(0x00F0FF)
           .setTitle('🎶 Added to Queue')
-          .setDescription(`**[${track.title}](${track.displayUrl || track.url})**`)
+          .setDescription(`**[${track.title.slice(0, 250)}](${track.displayUrl || track.url})**`)
           .addFields(
             { name: '⏱️ Duration', value: `\`${track.durationFormatted}\``, inline: true },
-            { name: '👤 Artist / Channel', value: `\`${track.uploader || 'Unknown'}\``, inline: true },
+            { name: '👤 Artist / Channel', value: `\`${track.uploader.slice(0, 50)}\``, inline: true },
             { name: '🙋 Requested By', value: `<@${interaction.user.id}>`, inline: true }
           );
 
@@ -72,7 +80,7 @@ module.exports = {
           embed.setThumbnail(track.thumbnail);
         }
 
-        return interaction.editReply({ embeds: [embed] });
+        return interaction.editReply({ embeds: [embed], allowedMentions: { parse: [] } });
       }
 
       // Multi-track playlist (Spotify / YouTube playlist)
@@ -86,7 +94,7 @@ module.exports = {
         .setTitle('📚 Playlist Added to Queue')
         .setDescription(`Loaded **${result.addedCount} track(s)**${note} into the queue!`)
         .addFields(
-          { name: '▶️ Next Up', value: `**${tracks[0].title}**`, inline: true },
+          { name: '▶️ Next Up', value: `**${tracks[0].title.slice(0, 250)}**`, inline: true },
           { name: '🙋 Requested By', value: `<@${interaction.user.id}>`, inline: true }
         );
 
@@ -94,10 +102,13 @@ module.exports = {
         playlistEmbed.setThumbnail(tracks[0].thumbnail);
       }
 
-      return interaction.editReply({ embeds: [playlistEmbed] });
+      return interaction.editReply({ embeds: [playlistEmbed], allowedMentions: { parse: [] } });
     } catch (err) {
       console.error('[Play Command Error]', err);
-      return interaction.editReply(`❌ Could not load \`${query}\`: ${err.message}`);
+      return interaction.editReply({
+        content: `❌ Could not load \`${query.slice(0, 100)}\`: ${err.message}`,
+        allowedMentions: { parse: [] }
+      });
     }
   },
 
@@ -105,6 +116,11 @@ module.exports = {
     const voiceChannel = message.member?.voice?.channel;
     if (!voiceChannel) {
       return message.reply('❌ You must be in a voice channel to play music!');
+    }
+
+    const existingQueue = musicManager.get(message.guild.id);
+    if (existingQueue && existingQueue.voiceChannel && existingQueue.voiceChannel.id !== voiceChannel.id) {
+      return message.reply(`❌ I am already active in <#${existingQueue.voiceChannel.id}>. Please join that channel to request music!`);
     }
 
     const permissions = voiceChannel.permissionsFor(message.client.user);
@@ -139,10 +155,10 @@ module.exports = {
         const embed = new EmbedBuilder()
           .setColor(0x00F0FF)
           .setTitle('🎶 Added to Queue')
-          .setDescription(`**[${track.title}](${track.displayUrl || track.url})**`)
+          .setDescription(`**[${track.title.slice(0, 250)}](${track.displayUrl || track.url})**`)
           .addFields(
             { name: '⏱️ Duration', value: `\`${track.durationFormatted}\``, inline: true },
-            { name: '👤 Artist / Channel', value: `\`${track.uploader || 'Unknown'}\``, inline: true },
+            { name: '👤 Artist / Channel', value: `\`${track.uploader.slice(0, 50)}\``, inline: true },
             { name: '🙋 Requested By', value: `<@${message.author.id}>`, inline: true }
           );
 
@@ -150,7 +166,9 @@ module.exports = {
           embed.setThumbnail(track.thumbnail);
         }
 
-        return loadingMsg ? loadingMsg.edit({ content: null, embeds: [embed] }) : message.reply({ embeds: [embed] });
+        return loadingMsg
+          ? loadingMsg.edit({ content: null, embeds: [embed], allowedMentions: { parse: [] } })
+          : message.reply({ embeds: [embed], allowedMentions: { parse: [] } });
       }
 
       const capNotes = [];
@@ -163,7 +181,7 @@ module.exports = {
         .setTitle('📚 Playlist Added to Queue')
         .setDescription(`Loaded **${result.addedCount} track(s)**${note} into the queue!`)
         .addFields(
-          { name: '▶️ Next Up', value: `**${tracks[0].title}**`, inline: true },
+          { name: '▶️ Next Up', value: `**${tracks[0].title.slice(0, 250)}**`, inline: true },
           { name: '🙋 Requested By', value: `<@${message.author.id}>`, inline: true }
         );
 
@@ -171,10 +189,12 @@ module.exports = {
         playlistEmbed.setThumbnail(tracks[0].thumbnail);
       }
 
-      return loadingMsg ? loadingMsg.edit({ content: null, embeds: [playlistEmbed] }) : message.reply({ embeds: [playlistEmbed] });
+      return loadingMsg
+        ? loadingMsg.edit({ content: null, embeds: [playlistEmbed], allowedMentions: { parse: [] } })
+        : message.reply({ embeds: [playlistEmbed], allowedMentions: { parse: [] } });
     } catch (err) {
       console.error('[Play Message Error]', err);
-      const text = `❌ Could not load \`${query}\`: ${err.message}`;
+      const text = `❌ Could not load \`${query.slice(0, 100)}\`: ${err.message}`;
       return loadingMsg ? loadingMsg.edit(text) : message.reply(text);
     }
   }

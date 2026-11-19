@@ -115,7 +115,7 @@ class GuildQueue {
     this.player.on('error', (error) => {
       console.error(`[AudioPlayer Error] in guild ${this.guildId}:`, error.message);
       if (this.textChannel) {
-        this.textChannel.send(`⚠️ Error playing **${this.currentTrack?.title || 'track'}**. Skipping...`).catch(() => {});
+        this.textChannel.send(`⚠️ Error playing **${this.currentTrack?.title || 'track'}**: ${error.message}`).catch(() => {});
       }
       this.skipRepeat = true;
       // The voice player emits Idle after a resource error.
@@ -167,7 +167,13 @@ class GuildQueue {
     if (this.destroyed) return;
     const finished = this.currentTrack;
     const playbackDuration = resource?.playbackDuration || 0;
-    const repeat = !this.skipRepeat && playbackDuration > 0;
+    const repeat = !this.skipRepeat && !finished?.playbackError && playbackDuration > 0;
+    if (finished?.playbackError && !this.skipRepeat && this.textChannel) {
+      this.textChannel.send({
+        content: `❌ Could not stream **${finished.title.slice(0, 150)}**. ${finished.playbackError.slice(0, 600)}`,
+        allowedMentions: { parse: [] }
+      }).catch(() => {});
+    }
     this.skipRepeat = false;
     this.currentTrack = null;
     this.currentResource = null;

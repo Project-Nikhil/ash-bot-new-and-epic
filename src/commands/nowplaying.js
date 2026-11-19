@@ -1,11 +1,11 @@
 const { SlashCommandBuilder } = require('discord.js');
 const musicManager = require('../music/MusicManager');
-const { createNowPlayingEmbed, createControlComponents } = require('../music/ui');
+const { createNowPlayingEmbed } = require('../music/ui');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('nowplaying')
-    .setDescription('Show details and interactive controls for the currently playing track'),
+    .setDescription('Show what\'s currently playing'),
 
   aliases: ['np', 'nowplaying', 'current'],
 
@@ -16,9 +16,8 @@ module.exports = {
     }
 
     const embed = createNowPlayingEmbed(queue.currentTrack, queue);
-    const components = createControlComponents(queue);
-
-    return interaction.reply({ embeds: [embed], components });
+    // No buttons — 100% command-driven bot
+    return interaction.reply({ embeds: [embed], allowedMentions: { parse: [] } });
   },
 
   async executeMessage(message) {
@@ -28,8 +27,6 @@ module.exports = {
     }
 
     const embed = createNowPlayingEmbed(queue.currentTrack, queue);
-    const components = createControlComponents(queue);
-
-    return message.reply({ embeds: [embed], components });
+    return message.reply({ embeds: [embed], allowedMentions: { parse: [] } });
   }
 };

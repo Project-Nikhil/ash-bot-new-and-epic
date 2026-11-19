@@ -25,7 +25,6 @@ module.exports = {
     const queue = musicManager.get(interaction.guildId);
     if (queue) {
       queue.autoDj = nextState;
-      queue.updateDashboard();
     }
 
     return interaction.reply(
@@ -50,7 +49,6 @@ module.exports = {
     const queue = musicManager.get(message.guild.id);
     if (queue) {
       queue.autoDj = nextState;
-      queue.updateDashboard();
     }
 
     return message.reply(

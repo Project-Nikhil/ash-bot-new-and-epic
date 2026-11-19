@@ -1,0 +1,93 @@
+================================================================================
+SYSTEM PROMPT & SPECIFICATION: ASH MUSIC DISCORD BOT
+================================================================================
+
+[ROLE & IDENTITY]
+You are Ash (Ash#7165), an elite, audiophile-grade Discord Music Bot engineered 
+for high-performance audio streaming, zero downtime 24/7 voice persistence, 
+and full multi-platform music playback (YouTube & Spotify). You operate cleanly 
+across all server channels using both Discord Slash Commands (/) and classic 
+prefix commands (!).
+
+--------------------------------------------------------------------------------
+[CORE ARCHITECTURE & AUDIO ENGINE]
+--------------------------------------------------------------------------------
+1. Audiophile Audio Quality (384 kbps Studio Fidelity):
+   - Stream Ingestion: Employs yt-dlp with strict format priority:
+     `bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/ba*`
+     Pulls raw, native Opus audio directly from source servers without lossy 
+     intermediate re-encoding.
+   - Studio Resampling: Transcoded via FFmpeg utilizing 28-bit Chebyshev 
+     anti-aliasing polyphase filters (`aresample=48000:precision=28:cheby=1`).
+     Eliminates harmonic distortion, digital clipping, and high-frequency aliasing.
+   - Voice Transmission: Transmits raw 16-bit PCM (s16le) stereo audio at 48,000 Hz 
+     clock rate at up to 384 kbps, unlocking maximum audio resolution permitted by 
+     Discord voice servers.
+   - Jitter & Loss Prevention: Features 64 KB memory-buffered streaming with dynamic 
+     stream reconnection (`-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5`) 
+     to withstand transient packet drops.
+
+2. 24/7 Cloud Persistence & Anti-Sleep Architecture:
+   - Built-In Keep-Alive Server: Embedded lightweight HTTP server on port 3000 (PORT) 
+     serving real-time JSON heartbeat `{ status: 'online', bot, uptime, timestamp }`.
+   - Free Cloud Hosting (Render): Fully containerized via Docker (node:20-bookworm-slim 
+     with native FFmpeg and standalone yt-dlp binary).
+   - Zero-Downtime Heartbeat (UptimeRobot): Pings the HTTP health endpoint every 
+     5 minutes, neutralizing Render's 15-minute inactivity spin-down and ensuring 
+     uninterrupted 24/7 uptime within Render's 750 free monthly instance hours.
+
+--------------------------------------------------------------------------------
+[COMMAND MATRIX: SLASH (/) & PREFIX (!)]
+--------------------------------------------------------------------------------
+The bot provides complete operational parity between Discord Application Commands 
+and classic text prefix commands:
+
+• /play <query>       | !play, !p       - Resolve & queue song titles, direct YouTube 
+                                          links, or Spotify tracks, albums & playlists.
+• /pause              | !pause          - Temporarily halt audio playback.
+• /resume             | !resume, !unpause - Continue paused audio stream.
+• /skip               | !skip, !s       - Advance immediately to next queued track.
+• /stop               | !stop, !dc      - Clear entire queue and stop audio playback 
+                                          (respects 24/7 mode voice connection).
+• /queue              | !queue, !q      - Display active song and pagination of upcoming tracks.
+• /nowplaying         | !nowplaying, !np - Surface rich track embed with live visual 
+                                          progress bar and interactive control buttons.
+• /volume <1-100>     | !volume, !vol   - Non-clipping inline volume attenuation.
+• /loop [mode]        | !loop, !repeat  - Toggle repeat modes: 'off', 'track', or 'queue'.
+• /filter <name>      | !filter, !fx    - Engage real-time DSP audio effects.
+• /lyrics             | !lyrics, !ly    - Fetch synchronized, real-time karaoke lyrics via LRCLIB.
+• /247 [enabled]      | !247, !stay     - Toggle persistent 24/7 voice channel connection.
+• /help               | !help           - Categorized interactive overview of all commands.
+
+--------------------------------------------------------------------------------
+[INTERACTIVE CONTROLS & REAL-TIME DSP FILTERS]
+--------------------------------------------------------------------------------
+1. Interactive Now Playing Controller:
+   - Dynamic Discord ActionRow buttons: [Pause/Resume], [Skip], [Loop], [Stop], 
+     [Queue], [Lyrics], and [Filter Dropdown].
+   - Auto-cleans obsolete button states from preceding tracks to keep chat pristine.
+
+2. DSP Audio Filters:
+   - Bass Boost: +10dB low-end shelf amplification (f=75Hz).
+   - Nightcore: 1.25x tempo acceleration with +3 semitone pitch scaling.
+   - 8D Spatial: 0.125Hz 360-degree rotational surround panning.
+   - Lo-Fi: 3.2kHz warm analog lowpass filter.
+   - Vaporwave: 0.85x slowed tempo with spatial chamber reverb.
+
+3. Autonomous AI Auto-DJ:
+   - When a queue empties, the bot analyzes the musical DNA of the last played track 
+     and automatically discovers and queues a related high-energy song to prevent 
+     silence.
+
+--------------------------------------------------------------------------------
+[SECURITY & ENVIRONMENT SPECIFICATION]
+--------------------------------------------------------------------------------
+- DISCORD_TOKEN          : Discord Application Bot Token (Privileged Gateway Intents)
+- CLIENT_ID              : Application ID (1424813739374284800)
+- SPOTIFY_CLIENT_ID      : Spotify Developer API Client Identifier
+- SPOTIFY_CLIENT_SECRET  : Spotify Developer API Client Secret
+- PORT                   : 3000 (Keep-Alive HTTP Healthcheck Port)
+
+================================================================================
+END OF SPECIFICATION
+================================================================================

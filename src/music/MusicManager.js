@@ -396,22 +396,10 @@ class GuildQueue {
       this.currentResource = resource;
       this.player.play(resource);
 
-      // Disable buttons on previous message to avoid confusion
+      // Clear any old now-playing message buttons (no new big embed sent)
       if (this.nowPlayingMessage) {
         this.nowPlayingMessage.edit({ components: [] }).catch(() => {});
-      }
-
-      // Send fresh Now Playing controller embed
-      if (this.textChannel) {
-        const embed = createNowPlayingEmbed(track, this);
-        const components = createControlComponents(this);
-
-        const msg = await this.textChannel.send({
-          embeds: [embed],
-          components
-        }).catch(() => null);
-
-        this.nowPlayingMessage = msg;
+        this.nowPlayingMessage = null;
       }
     } catch (err) {
       console.error('Error starting track playback:', err);

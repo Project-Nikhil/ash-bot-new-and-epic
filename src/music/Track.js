@@ -373,10 +373,9 @@ class Track {
 
     if (activeFilter && activeFilter.ffmpeg) {
       filterChain.push(activeFilter.ffmpeg);
+      // Anti-clipping limiter only needed when DSP filters are active
+      filterChain.push('alimiter=limit=0.95:attack=5:release=50');
     }
-
-    // Always append anti-clipping audio limiter for safe playback
-    filterChain.push('alimiter=limit=0.95:attack=5:release=50');
 
     const ffmpegArgs = [
       '-reconnect', '1',
@@ -395,7 +394,6 @@ class Track {
       '-f', 's16le',
       '-ar', '48000',
       '-ac', '2',
-      '-b:a', bitrateStr,
       'pipe:1'
     );
 

@@ -7,12 +7,6 @@ const {
 } = require('@discordjs/voice');
 const config = require('../config');
 const guildSettings = require('./GuildSettings');
-const {
-  createNowPlayingEmbed,
-  createControlComponents,
-  createDashboardEmbed,
-  createIdleDashboardEmbed
-} = require('./ui');
 const { Track } = require('./Track');
 const { AUDIO_FILTERS } = require('./filters');
 
@@ -28,7 +22,7 @@ class GuildQueue {
     this.tracks = [];
     this.currentTrack = null;
     this.volume = config.defaultVolume;
-    this.loopMode = 'off'; // 'off' | 'track' | 'queue'
+    this.loopMode = 'off';
     this.isPaused = false;
     this.destroyed = false;
     this.consecutiveQuickFails = 0;
@@ -36,18 +30,15 @@ class GuildQueue {
     this.aloneTimer = null;
     this.pausedDueToAlone = false;
     this.currentResource = null;
-    this.nowPlayingMessage = null;
     this.actionLock = false;
 
-    // Filter, Auto-DJ & History
     this.activeFilter = 'off';
     this.autoDj = false;
-    this.recentTracks = []; // Stores last 20 titles to prevent repetition
+    this.recentTracks = [];
     this.playbackStartTime = null;
     this.pausedAt = null;
     this.totalPausedDuration = 0;
 
-    // Reconnection state
     this.reconnectAttempts = 0;
     this.reconnectTimeout = null;
 
@@ -60,11 +51,8 @@ class GuildQueue {
       if (typeof saved.autoDj === 'boolean') this.autoDj = saved.autoDj;
     }
 
-    // Create AudioPlayer
     this.player = createAudioPlayer();
     this.setupPlayerListeners();
-
-    // Establish Voice Connection
     this.initVoiceConnection();
   }
 
@@ -81,7 +69,6 @@ class GuildQueue {
     this.connection.subscribe(this.player);
     this.setupConnectionListeners();
 
-    // Persist current channels
     guildSettings.set(this.guildId, {
       voiceChannelId: this.voiceChannel.id,
       textChannelId: this.textChannel?.id || null
@@ -95,7 +82,6 @@ class GuildQueue {
           entersState(this.connection, VoiceConnectionStatus.Signalling, 5000),
           entersState(this.connection, VoiceConnectionStatus.Connecting, 5000)
         ]);
-        // Successfully reconnected
         this.reconnectAttempts = 0;
       } catch (error) {
         this.handleVoiceDisconnect();
@@ -109,9 +95,6 @@ class GuildQueue {
     });
   }
 
-  /**
-   * Exponential backoff auto-reconnect for 24/7 reliability
-   */
   async handleVoiceDisconnect() {
     if (this.destroyed) return;
 
@@ -124,7 +107,7 @@ class GuildQueue {
     if (this.reconnectAttempts >= RECONNECT_BACKOFFS.length) {
       console.warn(`[VoiceConnection] Guild ${this.guildId}: Max reconnect attempts reached.`);
       if (this.textChannel) {
-        this.textChannel.send('⚠️ Could not reconnect to voice channel after multiple attempts. 24/7 paused until manually rejoined.').catch(() => {});
+        this.textChannel.send('⚠️ Could not reconnect to voice channel after multiple attempts. Please use `/247 true` again to rejoin.').catch(() => {});
       }
       this.destroy();
       return;
@@ -141,7 +124,6 @@ class GuildQueue {
         const client = this.voiceChannel?.client || this.textChannel?.client;
         if (!client) return;
 
-        // Verify channel still exists
         const channelId = settings.voiceChannelId || this.voiceChannel?.id;
         const channel = await client.channels.fetch(channelId).catch(() => null);
 
@@ -174,16 +156,12 @@ class GuildQueue {
     this.player.on('error', (error) => {
       console.error(`[AudioPlayer Error] in guild ${this.guildId}:`, error.message);
       if (this.textChannel) {
-        this.textChannel.send(`⚠️ Error playing track: ${error.message}. Skipping to next...`).catch(() => {});
+        this.textChannel.send(`⚠️ Error playing **${this.currentTrack?.title || 'track'}**. Skipping...`).catch(() => {});
       }
       this.handleTrackEnd();
     });
   }
 
-  /**
-   * Action lock / mutex wrapper to prevent double-skips and state corruption
-   * @param {Function} fn
-   */
   async withLock(fn) {
     if (this.actionLock) return false;
     this.actionLock = true;
@@ -201,16 +179,6 @@ class GuildQueue {
     return Math.max(0, Math.floor(elapsedMs / 1000));
   }
 
-  async updateDashboard() {
-    const client = this.voiceChannel?.client || this.textChannel?.client;
-    if (!client) return;
-    await this.manager.refreshDashboard(client, this.guildId, this);
-  }
-
-  /**
-   * Inspects voice channel to see if bot is alone
-   * Pauses after 5 mins if 24/7, leaves if non-24/7, auto-resumes when user joins
-   */
   checkAloneStatus() {
     if (!this.voiceChannel || this.destroyed) return;
     const humans = this.voiceChannel.members.filter(m => !m.user.bot);
@@ -230,7 +198,7 @@ class GuildQueue {
         this.pausedDueToAlone = false;
         this.resume();
         if (this.textChannel) {
-          this.textChannel.send('👋 Someone joined the voice channel! Resuming music.').catch(() => {});
+          this.textChannel.send('▶️ Someone joined — resuming music!').catch(() => {});
         }
       }
     }
@@ -241,16 +209,8 @@ class GuildQueue {
     if (settings.stay247) {
       this.pausedDueToAlone = true;
       this.pause();
-      if (this.currentTrack) {
-        this.currentTrack.cleanup(); // Clean up child processes to free CPU/RAM
-      }
-      if (this.textChannel) {
-        this.textChannel.send('⏸️ Channel empty for 5 minutes. Paused playback to save bandwidth & CPU (staying connected in 24/7 mode).').catch(() => {});
-      }
+      if (this.currentTrack) this.currentTrack.cleanup();
     } else {
-      if (this.textChannel) {
-        this.textChannel.send('👋 Voice channel was empty for 5 minutes. Left voice channel to save resources.').catch(() => {});
-      }
       this.destroy();
     }
   }
@@ -264,14 +224,12 @@ class GuildQueue {
 
       if (finishedTrack) {
         finishedTrack.cleanup();
-        // Record title in recent history (up to 20 tracks)
         if (finishedTrack.title) {
           this.recentTracks.push(finishedTrack.title);
           if (this.recentTracks.length > 20) this.recentTracks.shift();
         }
       }
 
-      // Guard against rapid infinite failure loops
       if (finishedTrack && playDurationMs < 1500) {
         this.consecutiveQuickFails += 1;
       } else {
@@ -283,7 +241,7 @@ class GuildQueue {
       this.totalPausedDuration = 0;
 
       if (this.consecutiveQuickFails >= 3) {
-        console.warn(`[MusicQueue] Guild ${this.guildId}: 3 consecutive quick failures. Resetting queue.`);
+        console.warn(`[MusicQueue] Guild ${this.guildId}: 3 consecutive quick failures. Resetting.`);
         this.consecutiveQuickFails = 0;
         this.currentTrack = null;
         this.currentResource = null;
@@ -292,7 +250,6 @@ class GuildQueue {
         return;
       }
 
-      // Handle Loop Modes
       if (this.loopMode === 'track' && finishedTrack) {
         this.play(finishedTrack);
         return;
@@ -305,12 +262,8 @@ class GuildQueue {
       this.currentTrack = null;
       this.currentResource = null;
 
-      // Auto-DJ: Find next related song when queue is dry
+      // Auto-DJ: find next related track when queue is empty
       if (this.tracks.length === 0 && this.autoDj && finishedTrack && !this.pausedDueToAlone) {
-        if (this.textChannel) {
-          this.textChannel.send('📻 *Auto-DJ is searching for a related track...*').catch(() => {});
-        }
-
         const recommendation = await Track.getRecommendation(
           finishedTrack.title,
           finishedTrack.uploader,
@@ -351,21 +304,13 @@ class GuildQueue {
 
     if (isIdle) {
       this.processQueue();
-    } else {
-      this.updateDashboard();
     }
 
-    return {
-      addedCount: toAdd.length,
-      playlistCapped,
-      queueCapped,
-      queueFull: false
-    };
+    return { addedCount: toAdd.length, playlistCapped, queueCapped, queueFull: false };
   }
 
   processQueue() {
     if (this.tracks.length === 0) {
-      this.updateDashboard();
       this.startIdleTimer();
       this.saveState();
       return;
@@ -395,12 +340,6 @@ class GuildQueue {
 
       this.currentResource = resource;
       this.player.play(resource);
-
-      // Clear any old now-playing message buttons (no new big embed sent)
-      if (this.nowPlayingMessage) {
-        this.nowPlayingMessage.edit({ components: [] }).catch(() => {});
-        this.nowPlayingMessage = null;
-      }
     } catch (err) {
       console.error('Error starting track playback:', err);
       if (this.textChannel) {
@@ -410,12 +349,6 @@ class GuildQueue {
     }
   }
 
-  /**
-   * Mid-song filter changes without restarting from 0:
-   * Restarts FFmpeg starting at current playback position (seekSeconds)
-   * @param {string} filterName
-   * @returns {string}
-   */
   async setFilter(filterName) {
     const selected = AUDIO_FILTERS[filterName] ? filterName : 'off';
     if (this.activeFilter === selected) return selected;
@@ -444,7 +377,6 @@ class GuildQueue {
       }
     }
 
-    this.updateDashboard();
     return this.activeFilter;
   }
 
@@ -453,7 +385,6 @@ class GuildQueue {
       this.player.pause();
       this.isPaused = true;
       this.pausedAt = Date.now();
-      this.updateDashboard();
       return true;
     }
     return false;
@@ -467,7 +398,6 @@ class GuildQueue {
       }
       this.player.unpause();
       this.isPaused = false;
-      this.updateDashboard();
       return true;
     }
     return false;
@@ -483,10 +413,7 @@ class GuildQueue {
     this.saveState();
 
     const settings = guildSettings.get(this.guildId);
-    if (settings.stay247 && !forceLeave) {
-      this.updateDashboard();
-      return;
-    }
+    if (settings.stay247 && !forceLeave) return;
 
     this.destroy();
   }
@@ -505,7 +432,6 @@ class GuildQueue {
       this.currentResource.volume.setVolume(this.volume / 100);
     }
     guildSettings.set(this.guildId, { volume: this.volume });
-    this.updateDashboard();
   }
 
   toggleLoop(mode) {
@@ -517,7 +443,6 @@ class GuildQueue {
       this.loopMode = modes[nextIdx];
     }
     guildSettings.set(this.guildId, { loopMode: this.loopMode });
-    this.updateDashboard();
     return this.loopMode;
   }
 
@@ -529,17 +454,10 @@ class GuildQueue {
 
   startIdleTimer() {
     this.resetIdleTimer();
-
-    // Respect 24/7 Mode — never auto-disconnect when enabled
     const settings = guildSettings.get(this.guildId);
-    if (settings.stay247) {
-      return;
-    }
+    if (settings.stay247) return;
 
     this.idleTimer = setTimeout(() => {
-      if (this.textChannel) {
-        this.textChannel.send('👋 Queue is empty. Left voice channel to save resources.').catch(() => {});
-      }
       this.destroy();
     }, config.idleTimeoutMs);
   }
@@ -551,9 +469,6 @@ class GuildQueue {
     }
   }
 
-  /**
-   * Persists active queue and state for redeploy / restart recovery
-   */
   saveState() {
     const savedQueue = this.tracks.map(t => ({
       title: t.title,
@@ -584,14 +499,8 @@ class GuildQueue {
     this.destroyed = true;
 
     this.resetIdleTimer();
-    if (this.aloneTimer) {
-      clearTimeout(this.aloneTimer);
-      this.aloneTimer = null;
-    }
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-      this.reconnectTimeout = null;
-    }
+    if (this.aloneTimer) { clearTimeout(this.aloneTimer); this.aloneTimer = null; }
+    if (this.reconnectTimeout) { clearTimeout(this.reconnectTimeout); this.reconnectTimeout = null; }
 
     if (this.currentTrack) {
       this.currentTrack.cleanup();
@@ -600,21 +509,10 @@ class GuildQueue {
 
     this.tracks = [];
 
-    if (this.nowPlayingMessage) {
-      this.nowPlayingMessage.edit({ components: [] }).catch(() => {});
-      this.nowPlayingMessage = null;
-    }
-
-    try {
-      this.player.stop(true);
-    } catch (_) {}
-
-    try {
-      this.connection.destroy();
-    } catch (_) {}
+    try { this.player.stop(true); } catch (_) {}
+    try { this.connection.destroy(); } catch (_) {}
 
     this.manager.delete(this.guildId);
-    this.updateDashboard();
   }
 }
 
@@ -630,53 +528,19 @@ class MusicManager {
   getOrCreate({ guildId, voiceChannel, textChannel }) {
     let queue = this.queues.get(guildId);
     if (!queue || queue.destroyed) {
-      queue = new GuildQueue({
-        manager: this,
-        guildId,
-        voiceChannel,
-        textChannel
-      });
+      queue = new GuildQueue({ manager: this, guildId, voiceChannel, textChannel });
       this.queues.set(guildId, queue);
     } else {
       if (voiceChannel && queue.voiceChannel?.id !== voiceChannel.id) {
         queue.voiceChannel = voiceChannel;
       }
-      if (textChannel) {
-        queue.textChannel = textChannel;
-      }
+      if (textChannel) queue.textChannel = textChannel;
     }
     return queue;
   }
 
   delete(guildId) {
     this.queues.delete(guildId);
-  }
-
-  async refreshDashboard(client, guildId, queue = null) {
-    const settings = guildSettings.get(guildId);
-    if (!settings.setupChannelId || !settings.setupMessageId) return;
-
-    try {
-      const channel = await client.channels.fetch(settings.setupChannelId).catch(() => null);
-      if (!channel) return;
-
-      const message = await channel.messages.fetch(settings.setupMessageId).catch(() => null);
-      if (!message) return;
-
-      const hasTrack = queue && queue.currentTrack;
-      const embed = hasTrack
-        ? createDashboardEmbed(queue)
-        : createIdleDashboardEmbed(guildId);
-
-      const components = createControlComponents(queue, guildId);
-
-      await message.edit({
-        embeds: [embed],
-        components
-      }).catch(() => {});
-    } catch (err) {
-      console.warn(`[Dashboard Refresh] Failed in guild ${guildId}:`, err.message);
-    }
   }
 }
 

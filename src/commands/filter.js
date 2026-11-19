@@ -30,10 +30,10 @@ module.exports = {
     }
 
     const filterName = interaction.options.getString('name');
-    const applied = queue.setFilter(filterName);
+    const applied = await queue.setFilter(filterName);
     const info = AUDIO_FILTERS[applied] || AUDIO_FILTERS.off;
 
-    return interaction.reply(`🎛️ Audio filter set to: \`${info.emoji} ${info.name}\`\n*Re-encoding audio stream...*`);
+    return interaction.reply(`🎛️ Audio filter set to: \`${info.emoji} ${info.name}\``);
   },
 
   async executeMessage(message, args) {

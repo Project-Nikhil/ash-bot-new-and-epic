@@ -167,6 +167,7 @@ class Track {
         '--dump-single-json',
         '--default-search', 'ytsearch',
         '--flat-playlist',
+        '--playlist-end', String(config.maxPlaylistImport),
         target
       ];
 
@@ -174,10 +175,26 @@ class Track {
       let stdout = '';
       let stderr = '';
 
-      proc.stdout.on('data', (data) => { stdout += data.toString(); });
-      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      const timeoutTimer = setTimeout(() => {
+        try {
+          proc.kill('SIGKILL');
+        } catch {}
+        reject(new Error('Playlist / search lookup timed out after 30 seconds.'));
+      }, 30000);
+
+      proc.stdout.on('data', (data) => {
+        if (stdout.length < 10 * 1024 * 1024) {
+          stdout += data.toString();
+        }
+      });
+      proc.stderr.on('data', (data) => {
+        if (stderr.length < 100 * 1024) {
+          stderr += data.toString();
+        }
+      });
 
       proc.on('close', (code) => {
+        clearTimeout(timeoutTimer);
         if (code !== 0) {
           return reject(new Error(parseYtdlError(stderr)));
         }
@@ -358,8 +375,8 @@ class Track {
     ];
 
     if (seekSeconds > 0) {
-      // Direct stream seek forward
-      ytdlArgs.push('--start-time', Math.floor(seekSeconds).toString());
+      // Direct stream seek forward via download-sections
+      ytdlArgs.push('--download-sections', `*${Math.floor(seekSeconds)}-inf`);
     }
 
     ytdlArgs.push(this.url);
@@ -378,12 +395,9 @@ class Track {
     }
 
     const ffmpegArgs = [
-      '-reconnect', '1',
-      '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
       '-i', 'pipe:0',
       '-analyzeduration', '0',
-      '-loglevel', '0'
+      '-loglevel', 'error'
     ];
 
     if (filterChain.length > 0) {
@@ -402,21 +416,46 @@ class Track {
     });
 
     const ffmpegProc = spawn('ffmpeg', ffmpegArgs, {
-      stdio: ['pipe', 'pipe', 'ignore']
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let ytdlStderr = '';
+    let ffmpegStderr = '';
+
+    ytdlProc.stderr.on('data', (d) => {
+      if (ytdlStderr.length < 50000) ytdlStderr += d.toString();
+    });
+    ffmpegProc.stderr.on('data', (d) => {
+      if (ffmpegStderr.length < 50000) ffmpegStderr += d.toString();
     });
 
     ytdlProc.stdout.pipe(ffmpegProc.stdin);
 
     // Prevent uncaught errors from crashing process
-    ytdlProc.on('error', () => {});
+    ytdlProc.on('error', (err) => {
+      console.error('[yt-dlp Spawn Error]:', err.message);
+    });
+    ffmpegProc.on('error', (err) => {
+      console.error('[FFmpeg Spawn Error]:', err.message);
+    });
     ytdlProc.stdout.on('error', () => {});
-    ytdlProc.stderr.on('error', () => {});
-    ffmpegProc.on('error', () => {});
     ffmpegProc.stdin.on('error', () => {});
     ffmpegProc.stdout.on('error', () => {});
 
-    ffmpegProc.on('close', () => {
-      this.cleanup();
+    // Scoped cleanup: only clean up if this was the active ffmpeg process
+    ffmpegProc.on('close', (code) => {
+      if (code !== 0 && code !== null) {
+        if (ffmpegStderr) console.error(`[FFmpeg Error Code ${code}]:`, ffmpegStderr.trim());
+      }
+      if (this.activeFfmpeg === ffmpegProc) {
+        this.cleanup();
+      }
+    });
+
+    ytdlProc.on('close', (code) => {
+      if (code !== 0 && code !== null) {
+        console.error(`[yt-dlp Stream Error Code ${code}]:`, parseYtdlError(ytdlStderr));
+      }
     });
 
     this.activeYtdl = ytdlProc;
@@ -439,20 +478,22 @@ class Track {
    */
   cleanup() {
     if (this.activeYtdl) {
-      try {
-        this.activeYtdl.stdout?.destroy();
-        this.activeYtdl.stderr?.destroy();
-        this.activeYtdl.kill('SIGKILL');
-      } catch (_) {}
+      const proc = this.activeYtdl;
       this.activeYtdl = null;
+      try {
+        proc.stdout?.destroy();
+        proc.stderr?.destroy();
+        proc.kill('SIGKILL');
+      } catch (_) {}
     }
     if (this.activeFfmpeg) {
-      try {
-        this.activeFfmpeg.stdin?.destroy();
-        this.activeFfmpeg.stdout?.destroy();
-        this.activeFfmpeg.kill('SIGKILL');
-      } catch (_) {}
+      const proc = this.activeFfmpeg;
       this.activeFfmpeg = null;
+      try {
+        proc.stdin?.destroy();
+        proc.stdout?.destroy();
+        proc.kill('SIGKILL');
+      } catch (_) {}
     }
   }
 }

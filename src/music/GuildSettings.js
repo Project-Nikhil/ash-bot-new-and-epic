@@ -8,7 +8,7 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'guild-settings.json');
 class GuildSettings {
   constructor() {
     this.cache = {};
-    this.load();
+    this.loaded = this.load();
   }
 
   getDefaults() {
@@ -41,7 +41,7 @@ class GuildSettings {
 
     // Attempt cloud database sync if configured (PostgreSQL / Supabase / Neon / Turso REST)
     if (config.databaseUrl) {
-      this.syncFromCloud().catch(err => {
+      return this.syncFromCloud().catch(err => {
         console.warn('[GuildSettings] Cloud DB initial sync failed (falling back to local cache):', err.message);
       });
     }

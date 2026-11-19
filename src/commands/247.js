@@ -2,33 +2,26 @@ const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const guildSettings = require('../music/GuildSettings');
 const musicManager = require('../music/MusicManager');
 
-async function toggle247({ guildId, client, voiceChannel, textChannel, forcedState }) {
-  const current = guildSettings.get(guildId).stay247;
-  const nextState = typeof forcedState === 'boolean' ? forcedState : !current;
+function toggle247({ guildId, voiceChannel, textChannel, forcedState }) {
+  const settings = guildSettings.get(guildId);
+  const enabled = typeof forcedState === 'boolean' ? forcedState : !settings.stay247;
+  const queue = musicManager.get(guildId);
 
-  guildSettings.set(guildId, { stay247: nextState });
-
-  let queue = musicManager.get(guildId);
-
-  if (nextState) {
-    if (queue) {
-      queue.resetIdleTimer();
-    } else if (voiceChannel) {
-      // Join voice channel immediately if user is in one
-      queue = musicManager.getOrCreate({
-        guildId,
-        voiceChannel,
-        textChannel
-      });
-    }
-  } else {
-    if (queue && !queue.currentTrack && queue.tracks.length === 0) {
-      queue.startIdleTimer();
-    }
+  if (!enabled) {
+    guildSettings.set(guildId, { stay247: false });
+    if (queue && !queue.currentTrack && !queue.tracks.length) queue.startIdleTimer();
+    return '24/7 mode disabled. Ash will leave after 3 minutes of inactivity.';
   }
 
-  await musicManager.refreshDashboard(client, guildId, queue);
-  return nextState;
+  const targetId = queue?.voiceChannel?.id || voiceChannel?.id || settings.voiceChannelId;
+  if (!targetId) return 'Join the voice channel you want Ash to stay in, then run `/247 enabled:True`.';
+
+  guildSettings.set(guildId, { stay247: true, voiceChannelId: targetId, textChannelId: textChannel?.id });
+  if (queue) queue.resetIdleTimer();
+  else if (voiceChannel?.id === targetId) {
+    musicManager.getOrCreate({ guildId, voiceChannel, textChannel });
+  }
+  return `24/7 mode enabled for <#${targetId}>. Ash will stay when the channel is empty and rejoin after a disconnect.`;
 }
 
 module.exports = {
@@ -48,20 +41,14 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply();
     const forced = interaction.options.getBoolean('enabled');
-    const newState = await toggle247({
+    const response = toggle247({
       guildId: interaction.guildId,
-      client: interaction.client,
       voiceChannel: interaction.member?.voice?.channel,
       textChannel: interaction.channel,
       forcedState: forced !== null ? forced : undefined
     });
 
-    return interaction.editReply(
-      `📻 **24/7 Voice Mode is now:** \`${newState ? '🟢 ENABLED' : '⚪ DISABLED'}\`\n` +
-      (newState
-        ? '✨ I will stay in your voice channel 24/7 without auto-disconnecting.'
-        : '⏱️ I will auto-leave the voice channel after 3 minutes of inactivity.')
-    );
+    return interaction.editReply(response);
   },
 
   async executeMessage(message, args) {
@@ -74,19 +61,13 @@ module.exports = {
     if (['on', 'enable', '1', 'true'].includes(input)) forced = true;
     else if (['off', 'disable', '0', 'false'].includes(input)) forced = false;
 
-    const newState = await toggle247({
+    const response = toggle247({
       guildId: message.guild.id,
-      client: message.client,
       voiceChannel: message.member?.voice?.channel,
       textChannel: message.channel,
       forcedState: forced
     });
 
-    return message.reply(
-      `📻 **24/7 Voice Mode is now:** \`${newState ? '🟢 ENABLED' : '⚪ DISABLED'}\`\n` +
-      (newState
-        ? '✨ I will stay in your voice channel 24/7 without auto-disconnecting.'
-        : '⏱️ I will auto-leave the voice channel after 3 minutes of inactivity.')
-    );
+    return message.reply(response);
   }
 };

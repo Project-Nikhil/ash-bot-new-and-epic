@@ -13,6 +13,7 @@ module.exports = {
 
     // 1. If bot was moved to a different voice channel
     if (newState.id === botId && newState.channelId && newState.channelId !== queue.voiceChannel?.id) {
+      if (guildSettings.get(guildId).stay247) return;
       queue.voiceChannel = newState.channel;
       guildSettings.set(guildId, { voiceChannelId: newState.channelId });
       queue.checkAloneStatus();
@@ -21,13 +22,7 @@ module.exports = {
 
     // 2. If bot was disconnected from voice channel
     if (oldState.id === botId && !newState.channelId) {
-      const settings = guildSettings.get(guildId);
-      if (settings.stay247) {
-        console.log(`[VoiceStateUpdate] Bot disconnected in 24/7 mode (Guild ${guildId}). Reconnecting...`);
-        queue.handleVoiceDisconnect();
-      } else {
-        queue.destroy();
-      }
+      if (!guildSettings.get(guildId).stay247) queue.destroy();
       return;
     }
 

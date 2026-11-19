@@ -30,7 +30,7 @@ All commands work seamlessly as Discord **Slash Commands (`/`)** and as classic 
 
 ## ✨ Features & Architecture
 
-* **📻 24/7 Voice Persistence:** Auto-reconnects on network drops or disconnects using exponential backoff (2s, 5s, 10s, 30s, 60s). Saves queue and channels on redeploy so it automatically rejoins and restores state.
+* **24/7 voice presence.** Ash checks the selected channel every five seconds. After a handshake grace period it retries with increasing delays, capped at one minute, while 24/7 mode is enabled.
 * **🛡️ Smart Idle & Alone-in-Channel Saver:** If everyone leaves the voice channel for 5 minutes in 24/7 mode, streaming processes (`yt-dlp`, `ffmpeg`) are suspended to save host CPU and RAM, and resume instantly as soon as a user rejoins.
 * **🎧 Honest Audio Quality:** Native Opus stream passthrough via `yt-dlp` preserving source fidelity. Features dynamic voice channel bitrate matching and an `alimiter` to prevent digital clipping on Bass Boost or high volumes.
 * **🎛️ Mid-Track DSP Filters:** Switching filters (Bass Boost, Nightcore, 8D Spatial, Lo-Fi, Vaporwave) smoothly restarts playback from the exact elapsed second rather than jumping back to 0.
@@ -51,20 +51,12 @@ npm start
 
 ---
 
-## 🌐 24/7 Cloud Hosting (Render + UptimeRobot)
+## 🌐 24/7 voice on Render
 
-### Step 1: Deploy on Render
-1. Create a **Web Service** on [Render.com](https://render.com) connected to your repository.
-2. Render detects the **Dockerfile** automatically and builds Node 20, FFmpeg, and yt-dlp.
-3. In **Environment Variables**, paste the variables from your `.env` file (`DISCORD_TOKEN`, `CLIENT_ID`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `PORT=3000`).
-4. Click **Create Web Service**.
-
-### Step 2: Keep-Alive with UptimeRobot
-1. In [UptimeRobot.com](https://uptimerobot.com), click **+ Add New Monitor**.
-2. **Monitor Type:** `HTTP(s)`
-3. **URL:** Your Render URL (`https://your-bot-name.onrender.com`)
-4. **Monitoring Interval:** `5 minutes`
-5. Click **Create Monitor**. Render will receive an HTTP ping every 5 minutes and will never go to sleep.
+1. Deploy the Dockerfile on an always-on Render instance. A Free web service can sleep after 15 minutes without inbound traffic. While the process is stopped, Ash cannot maintain a voice connection. [Render Free service limits](https://render.com/docs/free)
+2. For one fixed channel, set `GUILD_ID` to the Discord server ID and `VOICE_CHANNEL_ID` to the voice channel ID in the Render environment. On a fresh filesystem Ash uses these as its initial 24/7 target.
+3. You can also join the target channel and run `/247 enabled:True`. Ash confirms the channel in its reply. To remember slash-command selections and explicit opt-outs across restarts for either server, mount a writable persistent disk at `/usr/src/app/data`. Saved guild settings take precedence over the environment default. [Render persistent disks](https://render.com/docs/disks)
+4. `/stop` clears playback and keeps Ash in voice. `/leave` disconnects and disables 24/7. Use `/247 enabled:False` to disable automatic recovery. After an outage or deploy, Ash rejoins as soon as the service and Discord voice are available.
 
 ---
 

@@ -2,15 +2,12 @@ const {
   joinVoiceChannel,
   createAudioPlayer,
   AudioPlayerStatus,
-  VoiceConnectionStatus,
-  entersState
+  VoiceConnectionStatus
 } = require('@discordjs/voice');
 const config = require('../config');
 const guildSettings = require('./GuildSettings');
 const { Track } = require('./Track');
 const { AUDIO_FILTERS } = require('./filters');
-
-const RECONNECT_BACKOFFS = [2000, 5000, 10000, 30000, 60000];
 
 class GuildQueue {
   constructor({ manager, guildId, voiceChannel, textChannel }) {
@@ -39,8 +36,8 @@ class GuildQueue {
     this.pausedAt = null;
     this.totalPausedDuration = 0;
 
-    this.reconnectAttempts = 0;
-    this.reconnectTimeout = null;
+    this.disconnectTimer = null;
+    this.pendingTrackEnd = false;
 
     // Load persisted settings
     const saved = guildSettings.get(guildId);
@@ -53,99 +50,47 @@ class GuildQueue {
 
     this.player = createAudioPlayer();
     this.setupPlayerListeners();
-    this.initVoiceConnection();
-  }
-
-  initVoiceConnection() {
-    if (!this.voiceChannel) return;
-
-    this.connection = joinVoiceChannel({
-      channelId: this.voiceChannel.id,
-      guildId: this.guildId,
-      adapterCreator: this.voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf: true
-    });
-
-    this.connection.subscribe(this.player);
-    this.setupConnectionListeners();
-
+    this.connect();
     guildSettings.set(this.guildId, {
       voiceChannelId: this.voiceChannel.id,
       textChannelId: this.textChannel?.id || null
     });
   }
 
-  setupConnectionListeners() {
-    this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
-      try {
-        await Promise.race([
-          entersState(this.connection, VoiceConnectionStatus.Signalling, 5000),
-          entersState(this.connection, VoiceConnectionStatus.Connecting, 5000)
-        ]);
-        this.reconnectAttempts = 0;
-      } catch (error) {
-        this.handleVoiceDisconnect();
-      }
-    });
-
-    this.connection.on(VoiceConnectionStatus.Destroyed, () => {
-      if (!this.destroyed) {
-        this.handleVoiceDisconnect();
-      }
-    });
-  }
-
-  async handleVoiceDisconnect() {
-    if (this.destroyed) return;
-
-    const settings = guildSettings.get(this.guildId);
-    if (!settings.stay247) {
-      this.destroy();
+  connect() {
+    if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+      this.connection.rejoin({ channelId: this.voiceChannel.id });
       return;
     }
 
-    if (this.reconnectAttempts >= RECONNECT_BACKOFFS.length) {
-      console.warn(`[VoiceConnection] Guild ${this.guildId}: Max reconnect attempts reached.`);
-      if (this.textChannel) {
-        this.textChannel.send('⚠️ Could not reconnect to voice channel after multiple attempts. Please use `/247 true` again to rejoin.').catch(() => {});
+    const connection = joinVoiceChannel({
+      channelId: this.voiceChannel.id,
+      guildId: this.guildId,
+      adapterCreator: this.voiceChannel.guild.voiceAdapterCreator,
+      selfDeaf: true
+    });
+    this.connection = connection;
+    connection.on('error', error => {
+      console.warn(`[Voice] Guild ${this.guildId}: ${error.message}`);
+    });
+    const onStateChange = (_, state) => {
+      if (state.status === VoiceConnectionStatus.Destroyed) {
+        connection.off('stateChange', onStateChange);
       }
-      this.destroy();
-      return;
-    }
-
-    const delay = RECONNECT_BACKOFFS[this.reconnectAttempts] || 60000;
-    this.reconnectAttempts += 1;
-    console.log(`[VoiceConnection] Guild ${this.guildId}: Reconnecting in ${delay / 1000}s (Attempt ${this.reconnectAttempts})...`);
-
-    if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
-    this.reconnectTimeout = setTimeout(async () => {
-      if (this.destroyed) return;
-      try {
-        const client = this.voiceChannel?.client || this.textChannel?.client;
-        if (!client) return;
-
-        const channelId = settings.voiceChannelId || this.voiceChannel?.id;
-        const channel = await client.channels.fetch(channelId).catch(() => null);
-
-        if (!channel) {
-          console.warn(`[VoiceConnection] Guild ${this.guildId}: Saved voice channel no longer exists.`);
-          guildSettings.set(this.guildId, { stay247: false, voiceChannelId: null });
-          if (this.textChannel) {
-            this.textChannel.send('⚠️ The 24/7 voice channel was deleted. 24/7 mode has been disabled.').catch(() => {});
-          }
-          this.destroy();
-          return;
-        }
-
-        this.voiceChannel = channel;
-        this.initVoiceConnection();
-        this.reconnectAttempts = 0;
-        console.log(`[VoiceConnection] Guild ${this.guildId}: Successfully reconnected!`);
-      } catch (err) {
-        console.error(`[VoiceConnection] Reconnect error for guild ${this.guildId}:`, err.message);
-        this.handleVoiceDisconnect();
+      if (this.destroyed || this.connection !== connection) return;
+      clearTimeout(this.disconnectTimer);
+      if (guildSettings.get(this.guildId).stay247) return;
+      if (state.status === VoiceConnectionStatus.Destroyed) {
+        this.destroy();
+      } else if (state.status === VoiceConnectionStatus.Disconnected) {
+        this.disconnectTimer = setTimeout(() => {
+          if (!guildSettings.get(this.guildId).stay247) this.destroy();
+        }, 5000);
       }
-    }, delay);
+    };
+    connection.on('stateChange', onStateChange);
+    connection.subscribe(this.player);
+    onStateChange(null, connection.state);
   }
 
   setupPlayerListeners() {
@@ -169,6 +114,10 @@ class GuildQueue {
       return await fn();
     } finally {
       this.actionLock = false;
+      if (this.pendingTrackEnd) {
+        this.pendingTrackEnd = false;
+        setImmediate(() => this.handleTrackEnd());
+      }
     }
   }
 
@@ -218,6 +167,11 @@ class GuildQueue {
   async handleTrackEnd() {
     if (this.destroyed) return;
 
+    if (this.actionLock) {
+      this.pendingTrackEnd = true;
+      return;
+    }
+
     await this.withLock(async () => {
       const playDurationMs = this.playbackStartTime ? Date.now() - this.playbackStartTime : 0;
       const finishedTrack = this.currentTrack;
@@ -263,13 +217,18 @@ class GuildQueue {
       this.currentResource = null;
 
       // Auto-DJ: find next related track when queue is empty
-      if (this.tracks.length === 0 && this.autoDj && finishedTrack && !this.pausedDueToAlone) {
+      if (this.tracks.length === 0 && this.autoDj && finishedTrack && !this.pausedDueToAlone && !this.destroyed) {
         const recommendation = await Track.getRecommendation(
           finishedTrack.title,
           finishedTrack.uploader,
           this.recentTracks,
           finishedTrack.requestedBy
         );
+
+        // Discard recommendation if queue was destroyed, stopped, or had tracks added during lookup
+        if (this.destroyed || !this.autoDj || this.currentTrack || this.tracks.length > 0) {
+          return;
+        }
 
         if (recommendation) {
           this.enqueue(recommendation);
@@ -343,9 +302,13 @@ class GuildQueue {
     } catch (err) {
       console.error('Error starting track playback:', err);
       if (this.textChannel) {
-        this.textChannel.send(`❌ Could not play **${track.title}**: ${err.message}`).catch(() => {});
+        this.textChannel.send(`❌ Could not play **${track?.title || 'track'}**: ${err.message}`).catch(() => {});
       }
-      this.handleTrackEnd();
+      if (track) track.cleanup();
+      this.currentTrack = null;
+      this.currentResource = null;
+      // Advance to next song so queue does not get stranded
+      setImmediate(() => this.processQueue());
     }
   }
 
@@ -500,7 +463,7 @@ class GuildQueue {
 
     this.resetIdleTimer();
     if (this.aloneTimer) { clearTimeout(this.aloneTimer); this.aloneTimer = null; }
-    if (this.reconnectTimeout) { clearTimeout(this.reconnectTimeout); this.reconnectTimeout = null; }
+    clearTimeout(this.disconnectTimer);
 
     if (this.currentTrack) {
       this.currentTrack.cleanup();
@@ -526,6 +489,10 @@ class MusicManager {
   }
 
   getOrCreate({ guildId, voiceChannel, textChannel }) {
+    const settings = guildSettings.get(guildId);
+    if (settings.stay247 && settings.voiceChannelId && voiceChannel.id !== settings.voiceChannelId) {
+      throw new Error(`24/7 mode is set to <#${settings.voiceChannelId}>.`);
+    }
     let queue = this.queues.get(guildId);
     if (!queue || queue.destroyed) {
       queue = new GuildQueue({ manager: this, guildId, voiceChannel, textChannel });

@@ -12,6 +12,10 @@ module.exports = {
   async execute(interaction) {
     const queue = musicManager.get(interaction.guildId);
     if (!queue) {
+      if (guildSettings.get(interaction.guildId).stay247) {
+        guildSettings.set(interaction.guildId, { stay247: false, voiceChannelId: null });
+        return interaction.reply('24/7 mode disabled. Pending reconnect cancelled.');
+      }
       return interaction.reply({ content: '❌ I am not connected to any voice channel in this server!', ephemeral: true });
     }
 
@@ -30,6 +34,10 @@ module.exports = {
   async executeMessage(message) {
     const queue = musicManager.get(message.guild.id);
     if (!queue) {
+      if (guildSettings.get(message.guild.id).stay247) {
+        guildSettings.set(message.guild.id, { stay247: false, voiceChannelId: null });
+        return message.reply('24/7 mode disabled. Pending reconnect cancelled.');
+      }
       return message.reply('❌ I am not connected to any voice channel in this server!');
     }
 

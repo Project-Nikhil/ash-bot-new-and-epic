@@ -67,6 +67,9 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('uncaughtException', (error) => {
   console.error('[Uncaught Exception]', config.redactSecrets(String(error?.stack || error)));
+  if (!isShuttingDown) {
+    gracefulShutdown('UNCAUGHT_EXCEPTION');
+  }
 });
 
 // Built-in HTTP Healthcheck Server (Plain "ok" response - no leaks)

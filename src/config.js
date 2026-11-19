@@ -4,6 +4,7 @@ const config = {
   token: process.env.DISCORD_TOKEN || '',
   clientId: process.env.CLIENT_ID || '',
   guildId: process.env.GUILD_ID || '',
+  voiceChannelId: process.env.VOICE_CHANNEL_ID || '',
   prefix: process.env.PREFIX || '!',
   spotifyClientId: process.env.SPOTIFY_CLIENT_ID || '',
   spotifyClientSecret: process.env.SPOTIFY_CLIENT_SECRET || '',

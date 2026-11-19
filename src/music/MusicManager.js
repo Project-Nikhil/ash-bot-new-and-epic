@@ -60,6 +60,7 @@ class GuildQueue {
   connect() {
     if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
       this.connection.rejoin({ channelId: this.voiceChannel.id });
+      this.connection.subscribe(this.player);
       return;
     }
 
@@ -165,7 +166,8 @@ class GuildQueue {
   async handleTrackEnd(resource) {
     if (this.destroyed) return;
     const finished = this.currentTrack;
-    const repeat = !this.skipRepeat && resource.playbackDuration > 0;
+    const playbackDuration = resource?.playbackDuration || 0;
+    const repeat = !this.skipRepeat && playbackDuration > 0;
     this.skipRepeat = false;
     this.currentTrack = null;
     this.currentResource = null;
@@ -182,7 +184,7 @@ class GuildQueue {
       if (repeat && this.loopMode === 'queue') this.tracks.push(finished);
     }
 
-    if (!this.tracks.length && this.autoDj && finished && resource.playbackDuration > 0 && !this.pausedDueToAlone) {
+    if (!this.tracks.length && this.autoDj && finished && playbackDuration > 0 && !this.pausedDueToAlone) {
       const request = Symbol();
       this.recommendationRequest = request;
       const next = await Track.getRecommendation(finished.title, finished.uploader, this.recentTracks, finished.requestedBy);

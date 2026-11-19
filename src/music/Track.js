@@ -49,10 +49,22 @@ function getYtdlBaseArgs() {
     '--js-runtimes', 'node',
     '--no-warnings',
     '--no-check-certificates',
-    '--socket-timeout', '10'
+    '--socket-timeout', '10',
+    '--extractor-args', 'youtube:player_client=ios,android,web'
   ];
 
-  const cookieFile = config.youtubeCookiesPath || (fs.existsSync(COOKIES_PATH) ? COOKIES_PATH : null);
+  let cookieFile = config.youtubeCookiesPath || (fs.existsSync(COOKIES_PATH) ? COOKIES_PATH : null);
+  if (!cookieFile && config.youtubeCookies) {
+    try {
+      const os = require('os');
+      const tempCookiePath = path.join(os.tmpdir(), 'yt-cookies.txt');
+      if (!fs.existsSync(tempCookiePath) || fs.readFileSync(tempCookiePath, 'utf8') !== config.youtubeCookies) {
+        fs.writeFileSync(tempCookiePath, config.youtubeCookies, 'utf8');
+      }
+      cookieFile = tempCookiePath;
+    } catch (_) {}
+  }
+
   if (cookieFile) {
     args.push('--cookies', cookieFile);
   }
@@ -455,7 +467,11 @@ class Track {
 
     ytdlProc.on('close', (code) => {
       if (code !== 0 && code !== null) {
-        console.error(`[yt-dlp Stream Error Code ${code}]:`, parseYtdlError(ytdlStderr));
+        const errorMsg = parseYtdlError(ytdlStderr);
+        console.error(`[yt-dlp Stream Error Code ${code}]:`, errorMsg);
+        if (ffmpegProc?.stdout && !ffmpegProc.stdout.destroyed) {
+          ffmpegProc.stdout.destroy(new Error(errorMsg));
+        }
       }
     });
 

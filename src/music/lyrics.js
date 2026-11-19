@@ -1,4 +1,4 @@
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { EmbedBuilder } = require('discord.js');
 const { formatSeconds } = require('./ui');
 const { AUDIO_FILTERS } = require('./filters');
 
@@ -119,7 +119,7 @@ async function getLyrics(title, artist = '') {
  * @param {import('./Track').Track} track
  * @param {import('./MusicManager').GuildQueue} queue
  * @param {'live'|'full'} [viewMode='live']
- * @returns {Promise<{ embed: EmbedBuilder, components: ActionRowBuilder[] }>}
+ * @returns {Promise<{ embed: EmbedBuilder }>}
  */
 async function buildLyricsPayload(track, queue, viewMode = 'live') {
   const lyricsData = await getLyrics(track.title, track.uploader);
@@ -130,7 +130,7 @@ async function buildLyricsPayload(track, queue, viewMode = 'live') {
       name: '🎙️ ASH LIVE KARAOKE • SYNCHRONIZED LYRICS',
       iconURL: 'https://cdn.discordapp.com/emojis/858857444144414740.webp?size=96&quality=lossless'
     })
-    .setTitle(`🎶 ${lyricsData?.title || track.title} — ${lyricsData?.artist || track.uploader || 'Unknown'}`)
+    .setTitle(`🎶 ${lyricsData?.title || track.title} — ${lyricsData?.artist || track.uploader || 'Unknown'}`.slice(0, 256))
     .setTimestamp();
 
   if (track.thumbnail) {
@@ -146,15 +146,7 @@ async function buildLyricsPayload(track, queue, viewMode = 'live') {
         `*Tip: Synced lyrics are community-sourced via LRCLIB. Obscure remixes or soundcloud bootlegs might not have lyrics available.*`
       );
 
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('music_lyrics_refresh')
-        .setLabel('Retry Search')
-        .setEmoji('🔄')
-        .setStyle(ButtonStyle.Secondary)
-    );
-
-    return { embed, components: [row] };
+    return { embed };
   }
 
   // Adjust elapsed time by filter speed factor (Nightcore / Vaporwave)
@@ -193,8 +185,8 @@ async function buildLyricsPayload(track, queue, viewMode = 'live') {
 
     embed.setDescription(
       `⏱️ **Playback Position:** \`${formatSeconds(elapsedSec)} / ${track.durationFormatted}\`\n\n` +
-      formattedLines.join('\n\n') +
-      `\n\n*(Click **Sync / Next Line** as the song plays!)*`
+      formattedLines.join('\n\n').slice(0, 3800) +
+      `\n\n*(Run \`/lyrics\` again to refresh.)*`
     );
     embed.setFooter({ text: 'Mode: Live Synchronized Karaoke • LRCLIB' });
   } else {
@@ -205,23 +197,7 @@ async function buildLyricsPayload(track, queue, viewMode = 'live') {
     embed.setFooter({ text: 'Mode: Full Text Lyrics' });
   }
 
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('music_lyrics_refresh')
-      .setLabel('Sync / Next Line')
-      .setEmoji('🔄')
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(!hasSynced),
-
-    new ButtonBuilder()
-      .setCustomId(`music_lyrics_toggle:${viewMode === 'live' ? 'full' : 'live'}`)
-      .setLabel(viewMode === 'live' ? 'View Full Text' : 'View Live Karaoke')
-      .setEmoji(viewMode === 'live' ? '📜' : '🎤')
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(!hasSynced)
-  );
-
-  return { embed, components: [row] };
+  return { embed };
 }
 
 module.exports = {

@@ -22,12 +22,13 @@ class GuildQueue {
     this.loopMode = 'off';
     this.isPaused = false;
     this.destroyed = false;
-    this.consecutiveQuickFails = 0;
     this.idleTimer = null;
     this.aloneTimer = null;
     this.pausedDueToAlone = false;
     this.currentResource = null;
-    this.actionLock = false;
+    this.recommendationRequest = null;
+    this.skipRepeat = false;
+    this.bufferTimer = null;
 
     this.activeFilter = 'off';
     this.autoDj = false;
@@ -37,7 +38,6 @@ class GuildQueue {
     this.totalPausedDuration = 0;
 
     this.disconnectTimer = null;
-    this.pendingTrackEnd = false;
 
     // Load persisted settings
     const saved = guildSettings.get(guildId);
@@ -94,8 +94,21 @@ class GuildQueue {
   }
 
   setupPlayerListeners() {
-    this.player.on(AudioPlayerStatus.Idle, () => {
-      this.handleTrackEnd();
+    this.player.on('stateChange', (_, state) => {
+      clearTimeout(this.bufferTimer);
+      if (state.status === AudioPlayerStatus.Buffering) {
+        this.bufferTimer = setTimeout(() => {
+          if (this.player.state.resource !== state.resource) return;
+          console.warn(`[Playback] Guild ${this.guildId}: timed out waiting for audio`);
+          this.skip();
+        }, 30000);
+      }
+    });
+    this.player.on(AudioPlayerStatus.Playing, () => {
+      if (this.isPaused) this.player.pause();
+    });
+    this.player.on(AudioPlayerStatus.Idle, old => {
+      this.handleTrackEnd(old.resource).catch(error => console.error('[Track end]', error));
     });
 
     this.player.on('error', (error) => {
@@ -103,22 +116,9 @@ class GuildQueue {
       if (this.textChannel) {
         this.textChannel.send(`⚠️ Error playing **${this.currentTrack?.title || 'track'}**. Skipping...`).catch(() => {});
       }
-      this.handleTrackEnd();
+      this.skipRepeat = true;
+      // The voice player emits Idle after a resource error.
     });
-  }
-
-  async withLock(fn) {
-    if (this.actionLock) return false;
-    this.actionLock = true;
-    try {
-      return await fn();
-    } finally {
-      this.actionLock = false;
-      if (this.pendingTrackEnd) {
-        this.pendingTrackEnd = false;
-        setImmediate(() => this.handleTrackEnd());
-      }
-    }
   }
 
   getElapsedSeconds() {
@@ -156,88 +156,41 @@ class GuildQueue {
   handleAloneTimeout() {
     const settings = guildSettings.get(this.guildId);
     if (settings.stay247) {
-      this.pausedDueToAlone = true;
-      this.pause();
-      if (this.currentTrack) this.currentTrack.cleanup();
+      this.pausedDueToAlone = !this.isPaused && this.pause();
     } else {
       this.destroy();
     }
   }
 
-  async handleTrackEnd() {
+  async handleTrackEnd(resource) {
     if (this.destroyed) return;
+    const finished = this.currentTrack;
+    const repeat = !this.skipRepeat && resource.playbackDuration > 0;
+    this.skipRepeat = false;
+    this.currentTrack = null;
+    this.currentResource = null;
+    this.isPaused = false;
+    this.playbackStartTime = null;
+    this.pausedAt = null;
+    this.totalPausedDuration = 0;
 
-    if (this.actionLock) {
-      this.pendingTrackEnd = true;
-      return;
+    if (finished) {
+      finished.cleanup();
+      this.recentTracks.push(finished.title);
+      if (this.recentTracks.length > 20) this.recentTracks.shift();
+      if (repeat && this.loopMode === 'track') return this.play(finished);
+      if (repeat && this.loopMode === 'queue') this.tracks.push(finished);
     }
 
-    await this.withLock(async () => {
-      const playDurationMs = this.playbackStartTime ? Date.now() - this.playbackStartTime : 0;
-      const finishedTrack = this.currentTrack;
-
-      if (finishedTrack) {
-        finishedTrack.cleanup();
-        if (finishedTrack.title) {
-          this.recentTracks.push(finishedTrack.title);
-          if (this.recentTracks.length > 20) this.recentTracks.shift();
-        }
-      }
-
-      if (finishedTrack && playDurationMs < 1500) {
-        this.consecutiveQuickFails += 1;
-      } else {
-        this.consecutiveQuickFails = 0;
-      }
-
-      this.playbackStartTime = null;
-      this.pausedAt = null;
-      this.totalPausedDuration = 0;
-
-      if (this.consecutiveQuickFails >= 3) {
-        console.warn(`[MusicQueue] Guild ${this.guildId}: 3 consecutive quick failures. Resetting.`);
-        this.consecutiveQuickFails = 0;
-        this.currentTrack = null;
-        this.currentResource = null;
-        this.loopMode = 'off';
-        this.processQueue();
-        return;
-      }
-
-      if (this.loopMode === 'track' && finishedTrack) {
-        this.play(finishedTrack);
-        return;
-      }
-
-      if (this.loopMode === 'queue' && finishedTrack) {
-        this.tracks.push(finishedTrack);
-      }
-
-      this.currentTrack = null;
-      this.currentResource = null;
-
-      // Auto-DJ: find next related track when queue is empty
-      if (this.tracks.length === 0 && this.autoDj && finishedTrack && !this.pausedDueToAlone && !this.destroyed) {
-        const recommendation = await Track.getRecommendation(
-          finishedTrack.title,
-          finishedTrack.uploader,
-          this.recentTracks,
-          finishedTrack.requestedBy
-        );
-
-        // Discard recommendation if queue was destroyed, stopped, or had tracks added during lookup
-        if (this.destroyed || !this.autoDj || this.currentTrack || this.tracks.length > 0) {
-          return;
-        }
-
-        if (recommendation) {
-          this.enqueue(recommendation);
-          return;
-        }
-      }
-
-      this.processQueue();
-    });
+    if (!this.tracks.length && this.autoDj && finished && resource.playbackDuration > 0 && !this.pausedDueToAlone) {
+      const request = Symbol();
+      this.recommendationRequest = request;
+      const next = await Track.getRecommendation(finished.title, finished.uploader, this.recentTracks, finished.requestedBy);
+      if (this.destroyed || this.recommendationRequest !== request) return;
+      this.recommendationRequest = null;
+      if (next && this.autoDj) return this.enqueue(next);
+    }
+    this.processQueue();
   }
 
   enqueue(trackOrTracks) {
@@ -257,6 +210,7 @@ class GuildQueue {
     const toAdd = limitedBatch.slice(0, availableSlots);
     const queueCapped = limitedBatch.length > availableSlots;
 
+    this.recommendationRequest = null;
     this.tracks.push(...toAdd);
     this.resetIdleTimer();
     this.saveState();
@@ -269,6 +223,7 @@ class GuildQueue {
   }
 
   processQueue() {
+    if (this.destroyed || this.currentTrack) return;
     if (this.tracks.length === 0) {
       this.startIdleTimer();
       this.saveState();
@@ -326,17 +281,18 @@ class GuildQueue {
         const resource = this.currentTrack.createAudioResource({
           initialVolume: this.volume,
           filterName: this.activeFilter,
-          seekSeconds: elapsed,
+          seekSeconds: this.currentTrack.isLive ? 0 : elapsed,
           targetBitrate
         });
 
         this.currentResource = resource;
         this.player.play(resource);
         this.playbackStartTime = Date.now() - (elapsed * 1000);
-        this.pausedAt = null;
+        this.pausedAt = this.isPaused ? Date.now() : null;
         this.totalPausedDuration = 0;
       } catch (err) {
-        console.error('[Filter Change Error]', err);
+        this.currentTrack.cleanup();
+        throw err;
       }
     }
 
@@ -344,49 +300,41 @@ class GuildQueue {
   }
 
   pause() {
-    if (this.player.state.status === AudioPlayerStatus.Playing) {
-      this.player.pause();
-      this.isPaused = true;
-      this.pausedAt = Date.now();
-      return true;
-    }
-    return false;
+    if (this.isPaused || !this.currentTrack) return false;
+    const status = this.player.state.status;
+    if (status !== AudioPlayerStatus.Buffering && status !== AudioPlayerStatus.AutoPaused && !this.player.pause()) return false;
+    this.isPaused = true;
+    this.pausedAt = Date.now();
+    return true;
   }
 
   resume() {
-    if (this.player.state.status === AudioPlayerStatus.Paused) {
-      if (this.pausedAt) {
-        this.totalPausedDuration += Date.now() - this.pausedAt;
-        this.pausedAt = null;
-      }
-      this.player.unpause();
-      this.isPaused = false;
-      return true;
-    }
-    return false;
+    if (!this.isPaused || !this.currentTrack) return false;
+    this.isPaused = false;
+    this.totalPausedDuration += Date.now() - this.pausedAt;
+    this.pausedAt = null;
+    this.player.unpause();
+    return true;
   }
 
   stop(forceLeave = false) {
+    this.recommendationRequest = null;
     this.tracks = [];
-    if (this.currentTrack) {
-      this.currentTrack.cleanup();
-      this.currentTrack = null;
-    }
-    this.player.stop();
+    this.currentTrack?.cleanup();
+    this.currentTrack = null;
+    this.currentResource = null;
+    this.pausedDueToAlone = false;
+    this.player.stop(true);
     this.saveState();
 
-    const settings = guildSettings.get(this.guildId);
-    if (settings.stay247 && !forceLeave) return;
-
+    if (guildSettings.get(this.guildId).stay247 && !forceLeave) return;
     this.destroy();
   }
 
   skip() {
-    if (this.player.state.status !== AudioPlayerStatus.Idle) {
-      this.player.stop();
-      return true;
-    }
-    return false;
+    if (this.player.state.status === AudioPlayerStatus.Idle) return false;
+    this.skipRepeat = true;
+    return this.player.stop(true);
   }
 
   setVolume(volume) {
@@ -499,7 +447,7 @@ class MusicManager {
       this.queues.set(guildId, queue);
     } else {
       if (voiceChannel && queue.voiceChannel?.id !== voiceChannel.id) {
-        queue.voiceChannel = voiceChannel;
+        throw new Error(`Ash is already in <#${queue.voiceChannel.id}>. Join that channel to play music.`);
       }
       if (textChannel) queue.textChannel = textChannel;
     }

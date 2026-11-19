@@ -6,6 +6,7 @@ const {
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder
 } = require('discord.js');
+const config = require('../config');
 const { AUDIO_FILTERS } = require('./filters');
 const guildSettings = require('./GuildSettings');
 
@@ -62,10 +63,11 @@ function createProgressBar(elapsedSec, totalSec, size = 14) {
  */
 function formatTrackTitle(track) {
   const url = track.displayUrl || track.url;
-  if (url && /^https?:\/\//i.test(url)) {
-    return `**[${track.title}](${url})**`;
+  const title = track.title.slice(0, 140);
+  if (url && url.length <= 240 && /^https?:\/\//i.test(url)) {
+    return `**[${title}](${url})**`;
   }
-  return `**${track.title}**`;
+  return `**${title}**`;
 }
 
 /**
@@ -319,7 +321,7 @@ function createQueueEmbed(queue) {
 
   if (queue.tracks.length === 0) {
     embed.setDescription(
-      '```ansi\n\u001b[30;1m[Queue is empty]\u001b[0m\nType a song name or link in the music channel to add tracks!\n```' +
+      '```ansi\n\u001b[30;1m[Queue is empty]\u001b[0m\nUse /play to add a song.\n```' +
       (queue.autoDj ? '\n✨ *AI Auto-DJ is active! When this song ends, related tracks will automatically queue.*' : '')
     );
   } else {
@@ -329,7 +331,7 @@ function createQueueEmbed(queue) {
       .join('\n');
 
     const extra = queue.tracks.length > 8 ? `\n*...and ${queue.tracks.length - 8} more track(s)*` : '';
-    embed.setDescription(`**Upcoming Songs (${queue.tracks.length}/15):**\n\n${list}${extra}`);
+    embed.setDescription(`**Upcoming Songs (${queue.tracks.length}/${config.maxQueueSize}):**\n\n${list}${extra}`);
   }
 
   embed.setFooter({

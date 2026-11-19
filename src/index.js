@@ -14,9 +14,7 @@ if (!config.token) {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildVoiceStates
   ],
   allowedMentions: {
     parse: [],
@@ -114,7 +112,11 @@ setInterval(() => {
 function checkYtdlUpdate() {
   exec('yt-dlp -U', (err, stdout, stderr) => {
     if (err) {
-      console.warn('[yt-dlp Update Check]', (stderr || err.message).trim().slice(0, 100));
+      const msg = (stderr || err.message).trim();
+      // Suppress noisy GitHub API 403 rate-limit warnings on shared cloud IPs
+      if (!msg.includes('403') && !msg.includes('rate limit')) {
+        console.warn('[yt-dlp Update Check]', msg.slice(0, 100));
+      }
     } else {
       console.log('[yt-dlp Update Check]', stdout.trim().slice(0, 100));
     }
@@ -143,7 +145,7 @@ async function gracefulShutdown(signal) {
   } catch (_) {}
 
   console.log('[Shutdown] Clean shutdown completed. Exiting.');
-  process.exit(0);
+  process.exit(signal === 'UNCAUGHT_EXCEPTION' ? 1 : 0);
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

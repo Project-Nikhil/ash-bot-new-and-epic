@@ -15,7 +15,9 @@ module.exports = {
       } catch (error) {
         console.error(`[ERROR] Command ${interaction.commandName}:`, error);
         const payload = { content: '❌ An error occurred while executing this command!', ephemeral: true };
-        if (interaction.replied || interaction.deferred) {
+        if (interaction.deferred && !interaction.replied) {
+          await interaction.editReply({ content: payload.content }).catch(() => {});
+        } else if (interaction.replied) {
           await interaction.followUp(payload).catch(() => {});
         } else {
           await interaction.reply(payload).catch(() => {});

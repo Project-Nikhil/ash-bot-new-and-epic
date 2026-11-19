@@ -46,6 +46,7 @@ function isAllowedUrl(input) {
  */
 function getYtdlBaseArgs() {
   const args = [
+    '--js-runtimes', 'node',
     '--no-warnings',
     '--no-check-certificates',
     '--socket-timeout', '10'
@@ -280,7 +281,7 @@ class Track {
         target
       ];
 
-      const proc = spawn('yt-dlp', args);
+      const proc = spawn('yt-dlp', args, { timeout: 30000, killSignal: 'SIGKILL' });
       let stdout = '';
       let stderr = '';
 

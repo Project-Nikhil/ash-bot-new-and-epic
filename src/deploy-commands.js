@@ -45,5 +45,6 @@ const rest = new REST({ version: '10' }).setToken(config.token);
     }
   } catch (error) {
     console.error('❌ Error deploying application commands:', error);
+    process.exitCode = 1;
   }
 })();

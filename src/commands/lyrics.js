@@ -17,7 +17,7 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: true });
     const payload = await buildLyricsPayload(queue.currentTrack, queue, 'live');
-    return interaction.editReply({ embeds: [payload.embed], components: payload.components });
+    return interaction.editReply({ embeds: [payload.embed] });
   },
 
   async executeMessage(message) {
@@ -30,8 +30,8 @@ module.exports = {
     const payload = await buildLyricsPayload(queue.currentTrack, queue, 'live');
 
     if (replyMsg) {
-      return replyMsg.edit({ content: null, embeds: [payload.embed], components: payload.components });
+      return replyMsg.edit({ content: null, embeds: [payload.embed] });
     }
-    return message.reply({ embeds: [payload.embed], components: payload.components });
+    return message.reply({ embeds: [payload.embed] });
   }
 };

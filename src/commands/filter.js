@@ -48,7 +48,7 @@ module.exports = {
       return message.reply(`🎛️ Current filter: **${queue.activeFilter}**\nAvailable filters: \`${available}\`\nExample: \`!filter bassboost\``);
     }
 
-    const applied = queue.setFilter(input);
+    const applied = await queue.setFilter(input);
     const info = AUDIO_FILTERS[applied] || AUDIO_FILTERS.off;
     return message.reply(`🎛️ Audio filter set to: \`${info.emoji} ${info.name}\``);
   }

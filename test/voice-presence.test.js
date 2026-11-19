@@ -8,7 +8,8 @@ const settings = {
   get(id) { return this.cache[id] ||= {}; },
   set(id, patch) { return this.cache[id] = { ...this.get(id), ...patch }; }
 };
-for (const [file, exports] of [['../src/config', {}], ['../src/music/GuildSettings', settings]]) {
+const config = { defaultVolume: 80, maxPlaylistImport: 100, maxQueueSize: 100 };
+for (const [file, exports] of [['../src/config', config], ['../src/music/GuildSettings', settings]]) {
   const id = require.resolve(file);
   require.cache[id] = { id, filename: id, loaded: true, exports };
 }
@@ -99,4 +100,70 @@ test('retries a failed startup fetch and honors /leave during an outstanding fet
   assert.equal(manager.get(guild.id), null);
   assert.deepEqual(packets, []);
   assert.equal(settings.get(guild.id).stay247, false);
+});
+
+test('slash commands control the same player through buffering, pause, skip and stop', async t => {
+  const { readdirSync } = require('node:fs');
+  const { PassThrough } = require('node:stream');
+  const { createAudioResource, StreamType } = require('@discordjs/voice');
+  const { Track } = require('../src/music/Track');
+  const { guild, channel, client } = fixture('commands');
+  guild.name = 'Test server';
+  client.user.displayAvatarURL = () => 'https://example.org/avatar.png';
+  channel.permissionsFor = () => ({ has: () => true });
+  const tracks = ['One', 'Two'].map(title => new Track({
+    title, duration: 90, url: 'https://youtu.be/test', requestedBy: '123'
+  }));
+  t.mock.method(Track, 'resolve', async () => tracks);
+  t.mock.method(Track.prototype, 'createAudioResource', () =>
+    createAudioResource(new PassThrough({ objectMode: true }), { inputType: StreamType.Opus }));
+  t.mock.method(global, 'fetch', async () => ({ ok: true, json: async () => ({ syncedLyrics: '[00:00]Test' }) }));
+  const commands = new Map();
+  for (const file of readdirSync(require('node:path').join(__dirname, '../src/commands'))) {
+    const command = require('../src/commands/' + file);
+    commands.set(command.data.toJSON().name, command);
+  }
+  const exercised = new Set();
+  async function run(name, option) {
+    const interaction = {
+      guildId: guild.id, member: { voice: { channel } }, user: { id: '123' }, client,
+      options: { getBoolean: () => option, getString: () => option, getInteger: () => option },
+      deferReply: async () => {}, reply: value => value, editReply: value => value
+    };
+    const response = await commands.get(name).execute(interaction);
+    assert.ok(response, name);
+    for (const embed of response.embeds || []) embed.toJSON();
+    assert.equal(response.components?.length || 0, 0);
+    exercised.add(name);
+  }
+  await run('247', true);
+  const queue = manager.get(guild.id);
+  t.after(() => queue.destroy());
+  await run('play', 'test');
+  assert.equal(queue.currentTrack, tracks[0]);
+  await run('pause');
+  assert.equal(queue.isPaused, true);
+  await run('filter', 'bassboost');
+  assert.equal(queue.activeFilter, 'bassboost');
+  queue.currentResource.playStream.write(Buffer.from([0xf8, 0xff, 0xfe]));
+  await flush();
+  assert.equal(queue.player.state.status, 'paused');
+  await run('resume');
+  assert.equal(queue.isPaused, false);
+  await run('volume', 65);
+  assert.equal(queue.volume, 65);
+  await run('lyrics');
+  await run('queue');
+  await run('nowplaying');
+  await run('help');
+  await run('loop', 'track');
+  await run('skip');
+  assert.equal(queue.currentTrack, tracks[1]);
+  await run('autodj', true);
+  await run('stop');
+  assert.equal(queue.player.state.status, 'idle');
+  assert.equal(queue.destroyed, false);
+  await run('leave');
+  assert.equal(manager.get(guild.id), null);
+  assert.deepEqual(exercised, new Set(commands.keys()));
 });

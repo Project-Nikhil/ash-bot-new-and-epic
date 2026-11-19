@@ -6,32 +6,32 @@ A rock-solid, private Discord music bot with **persistent 24/7 Voice Channel pre
 
 ## 🎵 Commands List
 
-All commands work seamlessly as Discord **Slash Commands (`/`)** and as classic **Prefix Commands (`!`)** in any channel.
+Use Discord slash commands in your server.
 
-| Slash Command | Prefix Alias | Description |
-|---|---|---|
-| `/play <query>` | `!play`, `!p` | Play a song title, YouTube URL, or Spotify track / album / playlist link |
-| `/pause` | `!pause` | Pause current playback |
-| `/resume` | `!resume`, `!unpause` | Resume paused playback |
-| `/skip` | `!skip`, `!s` | Skip to the next track in the queue (protected against double-clicks) |
-| `/stop` | `!stop` | Stop playback and clear the queue (stays in voice if 24/7 is enabled) |
-| `/leave` | `!leave`, `!dc` | Forcefully disconnect from the voice channel and turn off 24/7 mode |
-| `/queue` | `!queue`, `!q` | View currently playing song and upcoming queue |
-| `/nowplaying` | `!nowplaying`, `!np` | Show track details, live progress bar, and interactive buttons |
-| `/volume <1-100>` | `!volume`, `!vol` | Adjust playback volume with zero digital clipping |
-| `/loop [mode]` | `!loop`, `!repeat` | Set loop mode (`off`, `track`, `queue`) |
-| `/filter <name>` | `!filter`, `!fx` | Apply audio DSP filters mid-song without restarting playback |
-| `/lyrics` | `!lyrics`, `!ly` | Display synchronized karaoke lyrics via LRCLIB (5s timeout & cache) |
-| `/247 [enabled]` | `!247`, `!stay` | Keep the bot permanently in the voice channel with auto-reconnect |
-| `/autodj [enabled]` | `!autodj`, `!dj` | Automatically queue related songs when the queue finishes |
-| `/help` | `!help`, `!h` | Display command guide and directory |
+| Slash Command | Description |
+|---|---|
+| `/play <query>` | Play a song title, YouTube URL, or Spotify track / album / playlist link |
+| `/pause` | Pause current playback |
+| `/resume` | Resume paused playback |
+| `/skip` | Skip to the next track in the queue (protected against double-clicks) |
+| `/stop` | Stop playback and clear the queue (stays in voice if 24/7 is enabled) |
+| `/leave` | Forcefully disconnect from the voice channel and turn off 24/7 mode |
+| `/queue` | View currently playing song and upcoming queue |
+| `/nowplaying` | Show track details, live progress bar |
+| `/volume <1-100>` | Adjust playback volume with zero digital clipping |
+| `/loop [mode]` | Set loop mode (`off`, `track`, `queue`) |
+| `/filter <name>` | Apply audio DSP filters mid-song without restarting playback |
+| `/lyrics` | Display synchronized karaoke lyrics via LRCLIB (5s timeout & cache) |
+| `/247 [enabled]` | Keep the bot permanently in the voice channel with auto-reconnect |
+| `/autodj [enabled]` | Automatically queue related songs when the queue finishes |
+| `/help` | Display command guide and directory |
 
 ---
 
 ## ✨ Features & Architecture
 
 * **24/7 voice presence.** Ash checks the selected channel every five seconds. After a handshake grace period it retries with increasing delays, capped at one minute, while 24/7 mode is enabled.
-* **🛡️ Smart Idle & Alone-in-Channel Saver:** If everyone leaves the voice channel for 5 minutes in 24/7 mode, streaming processes (`yt-dlp`, `ffmpeg`) are suspended to save host CPU and RAM, and resume instantly as soon as a user rejoins.
+* **🛡️ Smart Idle & Alone-in-Channel Saver:** If everyone leaves the voice channel for 5 minutes in 24/7 mode, the player pauses and keeps the stream available to resume when someone rejoins.
 * **🎧 Honest Audio Quality:** Native Opus stream passthrough via `yt-dlp` preserving source fidelity. Features dynamic voice channel bitrate matching and an `alimiter` to prevent digital clipping on Bass Boost or high volumes.
 * **🎛️ Mid-Track DSP Filters:** Switching filters (Bass Boost, Nightcore, 8D Spatial, Lo-Fi, Vaporwave) smoothly restarts playback from the exact elapsed second rather than jumping back to 0.
 * **🎤 Synced Karaoke Lyrics:** Fetches timestamped LRC lyrics from LRCLIB with in-memory caching and speed-factor synchronization.

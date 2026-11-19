@@ -18,26 +18,26 @@ module.exports = {
       .setTitle('🎧 High-Fidelity 24/7 Discord Music Bot')
       .setDescription(
         '**Ash** streams audio with **24/7 Voice Channel persistence**, **Spotify playlist conversion**, real-time **DSP Audio Filters**, and **Live Synced Karaoke Lyrics**.\n\n' +
-        '> 💡 All commands work with **Slash Commands (`/`)** and prefix commands (`!` or your server prefix)!'
+        '> 💡 Use slash commands in your server.'
       )
       .addFields(
         {
           name: '🎶 Playback Commands',
           value:
-            '`/play <query>` (or `!p`) — Play song name, YouTube URL, or Spotify track/album/playlist\n' +
+            '`/play <query>` — Play song name, YouTube URL, or Spotify track/album/playlist\n' +
             '`/pause` — Pause current playback\n' +
             '`/resume` — Resume paused music\n' +
-            '`/skip` (or `!s`) — Skip to the next track\n' +
+            '`/skip` — Skip to the next track\n' +
             '`/stop` — Clear queue and stop playback (stays in voice if 24/7 is enabled)\n' +
-            '`/leave` (or `!dc`) — Completely disconnect the bot from voice and turn off 24/7',
+            '`/leave` — Completely disconnect the bot from voice and turn off 24/7',
           inline: false
         },
         {
           name: '📜 Queue & Track Information',
           value:
-            '`/nowplaying` (or `!np`) — Show current track details, live progress bar & buttons\n' +
-            '`/queue` (or `!q`) — View upcoming songs in queue\n' +
-            '`/lyrics` (or `!ly`) — Display synchronized karaoke lyrics via LRCLIB',
+            '`/nowplaying` — Show current track details, live progress bar\n' +
+            '`/queue` — View upcoming songs in queue\n' +
+            '`/lyrics` — Display synchronized karaoke lyrics via LRCLIB',
           inline: false
         },
         {
@@ -60,7 +60,7 @@ module.exports = {
         }
       )
       .setFooter({
-        text: `Prefix: ${config.prefix} • Ash Music • Node.js Discord Bot`,
+        text: 'Ash Music',
         iconURL: 'https://cdn.discordapp.com/emojis/849993214477041705.webp?size=96&quality=lossless'
       })
       .setTimestamp();

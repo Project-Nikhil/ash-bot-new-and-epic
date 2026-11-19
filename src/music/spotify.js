@@ -136,12 +136,16 @@ async function getSpotifyTracks(url) {
     });
     if (!res.ok) throw new Error(`Spotify playlist lookup failed (status ${res.status})`);
     const playlist = await res.json();
-    const items = (playlist.tracks?.items || []).slice(0, config.maxPlaylistImport || 100);
+    const page = playlist.items || playlist.tracks;
+    if (!Array.isArray(page?.items)) {
+      throw new Error('Spotify did not grant access to this playlist’s songs. Try a track link or song title.');
+    }
+    const items = page.items.slice(0, config.maxPlaylistImport || 100);
 
     const tracks = [];
     for (const item of items) {
-      const track = item.track;
-      if (!track) continue;
+      const track = item?.item || item?.track;
+      if (!track?.name || (track.type && track.type !== 'track')) continue;
       const artist = track.artists?.map(a => a.name).join(', ') || 'Unknown Artist';
       const thumbnail = track.album?.images?.[0]?.url || playlist.images?.[0]?.url || null;
       tracks.push({

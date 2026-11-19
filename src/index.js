@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const { exec } = require('child_process');
 const { Client, Collection, GatewayIntentBits } = require('discord.js');
 const config = require('./config');
 
@@ -107,23 +106,6 @@ setInterval(() => {
     if (global.gc) global.gc();
   }
 }, 300000);
-
-// yt-dlp Periodic Auto-Update (Every 12 hours)
-function checkYtdlUpdate() {
-  exec('yt-dlp -U', (err, stdout, stderr) => {
-    if (err) {
-      const msg = (stderr || err.message).trim();
-      // Suppress noisy GitHub API 403 rate-limit warnings on shared cloud IPs
-      if (!msg.includes('403') && !msg.includes('rate limit')) {
-        console.warn('[yt-dlp Update Check]', msg.slice(0, 100));
-      }
-    } else {
-      console.log('[yt-dlp Update Check]', stdout.trim().slice(0, 100));
-    }
-  });
-}
-setTimeout(checkYtdlUpdate, 30000);
-setInterval(checkYtdlUpdate, 12 * 60 * 60 * 1000);
 
 // Graceful Shutdown Handler (SIGTERM on Render redeploy, SIGINT on Ctrl+C)
 let isShuttingDown = false;

@@ -1,0 +1,10 @@
+node_modules/
+.env
+*.log
+data/
+*.cs
+compile_mod.py
+get_events.py
+.DS_Store
+Thumbs.db
+

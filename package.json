@@ -1,0 +1,27 @@
+{
+  "name": "nikhil-bot",
+  "version": "1.0.0",
+  "description": "A modern, feature-packed Discord music bot",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --wasm-lazy-compilation src/index.js",
+    "deploy": "node src/deploy-commands.js"
+  },
+  "keywords": [
+    "discord",
+    "music",
+    "bot",
+    "audio",
+    "yt-dlp",
+    "ffmpeg"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@discordjs/opus": "^0.11.0",
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.28.1",
+    "dotenv": "^18.0.9",
+    "libsodium-wrappers": "^0.8.4"
+  }
+}

@@ -1,0 +1,146 @@
+const config = require('../config');
+
+let cachedToken = null;
+let tokenExpiresAt = 0;
+
+/**
+ * Gets a valid Spotify access token using Client Credentials
+ * @returns {Promise<string|null>}
+ */
+async function getSpotifyToken() {
+  if (!config.spotifyClientId || !config.spotifyClientSecret) {
+    return null;
+  }
+
+  const now = Date.now();
+  if (cachedToken && now < tokenExpiresAt - 60000) {
+    return cachedToken;
+  }
+
+  try {
+    const creds = Buffer.from(`${config.spotifyClientId}:${config.spotifyClientSecret}`).toString('base64');
+    const res = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${creds}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: 'grant_type=client_credentials'
+    });
+
+    if (!res.ok) {
+      console.warn(`[Spotify Auth Error] Status: ${res.status}`);
+      return null;
+    }
+
+    const data = await res.json();
+    cachedToken = data.access_token;
+    tokenExpiresAt = Date.now() + (data.expires_in * 1000);
+    return cachedToken;
+  } catch (err) {
+    console.warn('[Spotify Auth Error]', err.message);
+    return null;
+  }
+}
+
+/**
+ * Checks if a string is a Spotify URL
+ * @param {string} url
+ * @returns {boolean}
+ */
+function isSpotifyUrl(url) {
+  return /^(https?:\/\/)?(open\.)?spotify\.com\/(track|album|playlist)\/([a-zA-Z0-9]+)/i.test(url.trim());
+}
+
+/**
+ * Parses a Spotify URL into type and ID
+ * @param {string} url
+ * @returns {{ type: 'track'|'album'|'playlist', id: string } | null}
+ */
+function parseSpotifyUrl(url) {
+  const match = url.trim().match(/spotify\.com\/(track|album|playlist)\/([a-zA-Z0-9]+)/i);
+  if (!match) return null;
+  return { type: match[1].toLowerCase(), id: match[2] };
+}
+
+/**
+ * Fetches tracks from Spotify API
+ * @param {string} url
+ * @returns {Promise<Array<{ title: string, artist: string, duration: number, thumbnail: string|null, query: string }> | null>}
+ */
+async function getSpotifyTracks(url) {
+  const parsed = parseSpotifyUrl(url);
+  if (!parsed) return null;
+
+  const token = await getSpotifyToken();
+  if (!token) {
+    throw new Error('Spotify API credentials are missing or invalid in .env.');
+  }
+
+  const headers = { Authorization: `Bearer ${token}` };
+
+  if (parsed.type === 'track') {
+    const res = await fetch(`https://api.spotify.com/v1/tracks/${parsed.id}`, { headers });
+    if (!res.ok) throw new Error(`Spotify track lookup failed (status ${res.status})`);
+    const track = await res.json();
+    const artist = track.artists?.map(a => a.name).join(', ') || 'Unknown Artist';
+    const thumbnail = track.album?.images?.[0]?.url || null;
+
+    return [{
+      title: track.name,
+      artist,
+      duration: Math.floor((track.duration_ms || 0) / 1000),
+      thumbnail,
+      query: `${track.name} ${artist} audio`
+    }];
+  }
+
+  if (parsed.type === 'album') {
+    const res = await fetch(`https://api.spotify.com/v1/albums/${parsed.id}`, { headers });
+    if (!res.ok) throw new Error(`Spotify album lookup failed (status ${res.status})`);
+    const album = await res.json();
+    const thumbnail = album.images?.[0]?.url || null;
+
+    return (album.tracks?.items || []).map(track => {
+      const artist = track.artists?.map(a => a.name).join(', ') || album.artists?.[0]?.name || 'Unknown Artist';
+      return {
+        title: track.name,
+        artist,
+        duration: Math.floor((track.duration_ms || 0) / 1000),
+        thumbnail,
+        query: `${track.name} ${artist} audio`
+      };
+    });
+  }
+
+  if (parsed.type === 'playlist') {
+    const res = await fetch(`https://api.spotify.com/v1/playlists/${parsed.id}`, { headers });
+    if (!res.ok) throw new Error(`Spotify playlist lookup failed (status ${res.status})`);
+    const playlist = await res.json();
+    const items = playlist.tracks?.items || [];
+
+    const tracks = [];
+    for (const item of items) {
+      const track = item.track;
+      if (!track) continue;
+      const artist = track.artists?.map(a => a.name).join(', ') || 'Unknown Artist';
+      const thumbnail = track.album?.images?.[0]?.url || playlist.images?.[0]?.url || null;
+      tracks.push({
+        title: track.name,
+        artist,
+        duration: Math.floor((track.duration_ms || 0) / 1000),
+        thumbnail,
+        query: `${track.name} ${artist} audio`
+      });
+    }
+    return tracks;
+  }
+
+  return null;
+}
+
+module.exports = {
+  isSpotifyUrl,
+  parseSpotifyUrl,
+  getSpotifyTracks
+};
